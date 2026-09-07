@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "icil-jax-rlbench"
+version = "0.1.0"
+description = "Fast-weight test-time training diagnostics for robot imitation."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "absl-py==2.3.1",
+  "flax==0.12.7",
+  "h5py==3.15.1",
+  "jax==0.10.0",
+  "ml-collections==1.1.0",
+  "numpy==2.3.4",
+  "optax==0.2.8",
+]
+
+[project.optional-dependencies]
+cuda12 = [
+  "jax[cuda12]==0.10.0",
+]
+wandb = [
+  "wandb==0.22.3",
+]
+
+[dependency-groups]
+dev = [
+  { include-group = "visualization" },
+  "pytest>=8,<10",
+]
+metaworld = [
+  { include-group = "visualization" },
+  "phi-mujoco[viz]",
+]
+visualization = [
+  "av>=14,<17",
+  "imageio>=2.37,<3",
+  "matplotlib>=3.9,<4",
+  "plotly>=6,<7",
+  "scikit-learn>=1.7,<2",
+]
+
+[tool.uv.sources]
+phi-mujoco = { path = "../phi-mujoco", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["icil_jax_rlbench"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config"
+testpaths = ["tests"]

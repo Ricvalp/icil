@@ -4,7 +4,6 @@ __pycache__/
 *.py[cod]
 **/*.py[cod]
 *$py.class
-.python-version
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -52,6 +51,9 @@ rlbench/
 urdfs/
 contextual_tasks/
 
+# Data and datasets
+datasets/
+
 # Slurm / sbatch logs
 slurm-*.out
 *.out
@@ -75,3 +77,5 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+
