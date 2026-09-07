@@ -1,341 +1,127 @@
 # AGENTS.md
 
-Instructions for Codex or other coding agents working on this standalone JAX RLBench ICIL repository.
+Instructions for coding agents working on the `fast-weight-ttt` branch.
 
 ## Hard Constraints
 
-- This directory is intended to be moved and developed as an independent repository.
-- Do not import from the old parent repo packages, including `icil`, `icil_jax_query_memory`, `diagnostics`, or MetaWorld code.
-- Keep all implementation self-contained under `icil_jax_rlbench/` unless explicitly asked to add external tooling.
-- Do not add checkpoint conversion from old PyTorch checkpoints unless explicitly requested. The current checkpoint format is standalone pickle.
-- Preserve backward compatibility for checkpoints produced by this package whenever feasible.
-- Avoid destructive git commands. Do not reset or revert user changes unless explicitly asked.
+- Do not import from `icil`, `icil_jax_query_memory`, `diagnostics`, or the
+  upstream `metaworld` package. Use only public `phi_mujoco` contracts for the
+  explicitly requested MetaWorld policy experiment.
+- The legacy direct-regression pretraining, parameter-MAML, and memory-MAML paths
+  were intentionally removed. Do not restore them unless the user explicitly
+  asks.
+- Keep implementation under `icil_jax_rlbench/` unless external tooling is
+  explicitly requested.
+- Do not add old PyTorch checkpoint conversion unless explicitly requested.
+- Avoid destructive Git operations and never revert unrelated user changes.
 
 ## Project Purpose
 
-This package is a JAX/Flax reimplementation of the RLBench in-context imitation learning direct-regression experiments. The main goal is to make pretraining and MAML-style finetuning fast enough to run many more steps than the older Python-loop PyTorch implementation.
+This branch tests whether one or a few demonstrations can produce useful
+gradient-based test-time adaptation for robot imitation. It starts with a
+controlled hidden-goal state benchmark and moves to RLBench only after the state
+diagnostic gates pass.
 
-Supported training modes:
+The main method uses a small fast-weight module, full second-order gradients, a
+key-value reconstruction WRITE objective, and an outer action-imitation READ
+objective. FOMAML and support action-BC WRITE are ablations.
 
-- `pretrain`: standard in-context direct regression from support demonstrations plus query observation to an action chunk.
-- `param_maml`: parameter MAML/FOMAML. Inner loop updates model parameters on support-derived held-out queries, outer loop evaluates adapted parameters on a query episode.
-- `memory_maml`: memory MAML/FOMAML. Inner loop updates encoded support-memory tokens only; model parameters are optimized by the outer loop.
+## Scientific Invariants
 
-The first implementation intentionally covers direct regression only. It does not implement all old ICIL variants.
+- Support influences query predictions only through an explicit fast-state
+  update. Do not add direct support cross-attention, support FiLM, task labels,
+  language, or support-token initialization of READ memory to the main path.
+- Query prediction accepts only slow parameters, fast state, and query
+  observation. Query actions must never enter the query encoder or READ path.
+- Support and query are different episodes with different starts but the same
+  hidden task latent.
+- Reset fast state to meta-learned `W0` at every task boundary. Adapt on support,
+  then freeze and reuse that state for declared query episodes.
+- Support WRITE losses train adaptation but are not added to the outer objective.
+- Full second-order differentiation is the main method. `first_order=True` is a
+  named FOMAML ablation and must visibly remove the expected meta-gradient paths.
+- Never save transient task-adapted fast state in checkpoints or optimize it with
+  the slow optimizer.
+
+## Gate Order
+
+1. Verify benchmark integrity and train a competent query-only policy.
+2. Pass Gate 1: ordinary support adaptation improves independent held-out query
+   episodes.
+3. Pass Gate 2: fixed-meta-batch loss, finite-difference, JIT, reset, and update
+   direction checks.
+4. Pass Gate 3: held-out goals show support-specific adaptation under matched
+   controls and multiple seeds.
+5. Only then implement and run end-to-end RLBench TTT.
+
+Do not interpret a passing Gate 2 as evidence of held-out adaptation.
 
 ## Directory Structure
 
-- `icil_jax_rlbench/data/`: standalone RLBench dense H5 cache reader and samplers.
-- `icil_jax_rlbench/models/`: Flax attention blocks, Perceiver/Supernode encoders, and direct-regression policy.
-- `icil_jax_rlbench/train/`: pmap training runner, MAML/pretrain steps, checkpoint utilities.
-- `icil_jax_rlbench/configs/`: ml-collections configs for the six main combinations.
-- `icil_jax_rlbench/pretrain_direct_regression.py`: pretraining entrypoint.
-- `icil_jax_rlbench/param_maml_direct_regression.py`: parameter MAML/FOMAML entrypoint.
-- `icil_jax_rlbench/memory_maml_direct_regression.py`: memory MAML/FOMAML entrypoint.
-- `README.md`: user-facing quickstart.
-
-## Data Contract
-
-The only external data dependency is the dense RLBench H5 cache under `ICIL_CACHE_ROOT` or `--config.data.cache_root`.
-
-Expected cache layout:
-
-```text
-CACHE_ROOT/
-  task_name/
-    variation0.h5
-    variation1.h5
-    ...
-```
-
-Each variation H5 file is expected to contain:
-
-```text
-episode_ids
-episodes/<episode_id>/xyz       [T, N, 3]
-episodes/<episode_id>/valid     [T, N]
-episodes/<episode_id>/state     [T, S]
-episodes/<episode_id>/action    [T, A]
-episodes/<episode_id>/rgb       [T, N, 3] optional
-episodes/<episode_id>/mask_id   [T, N] optional
-```
-
-Known current RLBench dense cache dimensions are usually:
-
-- `N=1024` points
-- `S=8` state dims
-- `A=8` action dims
-
-Do not assume those dimensions in code; infer them through `RLBenchCacheStore.infer_dims()`.
-
-## Sampling Semantics
-
-Core config fields:
-
-- `data.K`: number of support demos.
-- `data.L`: keyframes sampled from each support demo.
-- `data.T_obs`: query observation history length.
-- `data.H`: predicted action chunk length.
-- `data.stride`: temporal stride for observation/action indices.
-- `data.traj_len`: fixed support action-trajectory token length.
-- `data.task_sampling`: `variation_uniform`, `task_uniform`, or `variation_power`.
-- `data.preload_to_memory`: if `True`, load the full H5 cache into host RAM at startup.
-
-Batch builders in `data/sampler.py` define the training semantics. If changing them, update this file and README.
-
-Pretrain batch:
-
-- sample one variation
-- sample `K` support episodes and one query episode
-- support gives `cond_*`
-- query gives `query_*` and `target_action`
-
-Parameter-MAML batch:
-
-- sample one variation
-- sample `K` support episodes and one query episode
-- inner loop uses leave-one-out support episodes: `K-1` context demos predict the held-out support episode chunk
-- outer loop predicts chunks from the query episode using support context
-
-Memory-MAML batch:
-
-- sample one variation
-- sample `K` support episodes and one query episode
-- initialize memory from `K-1` support demos
-- inner loop updates memory tokens using chunks from the held-out support demo
-- outer loop predicts chunks from the query episode using adapted memory
-
-## Model Semantics
-
-Main model: `DirectRegressionPolicy` in `models/direct_regression_policy.py`.
-
-High-level flow:
-
-1. Encode support demonstrations into support/memory tokens.
-2. Encode query observations into query tokens.
-3. Decode action chunk with learned action queries attending to query + support/memory tokens.
-
-Encoder choices:
-
-- `perceiver`: each frame point cloud is compressed by latent cross-attention.
-- `supernode`: each frame point cloud is softly pooled around deterministic supernode centers, then refined with self-attention.
-
-Support tokens include:
-
-- point/state tokens from sampled support keyframes
-- optional support trajectory action tokens when `model.encoder.use_traj_tokens=True`
-- optional RGB when `model.encoder.use_rgb=True`
-- optional mask IDs when `model.encoder.use_mask_id=True`
-
-Memory in this repo means encoded support tokens, not an external replay buffer.
-
-## MAML Semantics
-
-Config:
-
-```bash
---config.maml.first_order=False  # full second-order MAML
---config.maml.first_order=True   # FOMAML
-```
-
-Parameter MAML:
-
-- inner loop differentiates `inner_loss` w.r.t. parameters
-- if `first_order=False`, outer gradients flow through the inner update
-- if `first_order=True`, inner gradients are stop-gradiented before applying updates
-- `maml.inner_param_include` and `maml.inner_param_exclude` optionally select fast weights by parameter-name substring
-
-Memory MAML:
-
-- support memory tokens are encoded from support demonstrations
-- inner loop differentiates support-heldout loss w.r.t. those memory tokens
-- adapted memory tokens are used for the outer query loss
-- model parameters receive outer gradients; full second-order mode allows gradients through memory adaptation
-
-## Attention Logging
-
-Optional config:
-
-```bash
---config.train.log_attention_stats=True
-```
-
-Default is `False` to avoid requesting decoder attention weights on the normal path.
-
-Metrics:
-
-- `train/attn_memory_entropy`: normalized entropy over support/memory tokens. Uniform is near 1; selective is closer to 0.
-- `train/attn_memory_max`: maximum probability after renormalizing over memory tokens only.
-- `train/attn_memory_raw_max`: maximum raw decoder cross-attention probability assigned to a memory token.
-- `train/attn_memory_mass`: total raw decoder cross-attention mass assigned to memory tokens.
-- `train/attn_query_entropy`: normalized entropy over query tokens.
-
-## Prediction Logging
-
-When W&B is enabled, prediction diagnostics are logged periodically by default:
-
-```bash
---config.wandb.prediction_log_every=200 \
---config.wandb.prediction_num_samples=64 \
---config.wandb.prediction_num_plots=4
-```
-
-The runner samples pretrain-style batches from the training task pool and, if
-`data.exclude_tasks` is non-empty, from the excluded task pool. It logs
-`eval/train_mse`, optional `eval/excluded_mse`, and a few Plotly 3D action-chunk
-figures comparing decoded predicted XYZ chunks with ground truth chunks.
-
-## Checkpoints
-
-Checkpoint files are pickle payloads saved by `train/checkpoints.py`.
-
-Payload fields:
-
-- `step`
-- `params`
-- `opt_state`
-- `rng`
-- `config`
-- `extra`
-
-Resume from a package checkpoint:
-
-```bash
---config.train.resume_path=/path/to/step_XXXXXXX.pkl
-```
-
-Finetune from pretrained params while resetting optimizer and RNG:
-
-```bash
---config.train.resume_path=/path/to/pretrain.pkl \
---config.train.resume_optimizer=False \
---config.train.resume_rng=False
-```
-
-## Common Commands
-
-Pretrain Perceiver:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/pretrain_direct_regression.py \
-  --config=icil_jax_rlbench/configs/pretrain_perceiver.py
-```
-
-Pretrain Supernode:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/pretrain_direct_regression.py \
-  --config=icil_jax_rlbench/configs/pretrain_supernode.py
-```
-
-Full second-order parameter MAML:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/param_maml_direct_regression.py \
-  --config=icil_jax_rlbench/configs/param_maml_perceiver.py \
-  --config.maml.first_order=False
-```
-
-FOMAML parameter fine-tuning:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/param_maml_direct_regression.py \
-  --config=icil_jax_rlbench/configs/param_maml_perceiver.py \
-  --config.maml.first_order=True
-```
-
-Full second-order memory MAML:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/memory_maml_direct_regression.py \
-  --config=icil_jax_rlbench/configs/memory_maml_perceiver.py \
-  --config.maml.first_order=False
-```
-
-Preload the full cache into RAM:
-
-```bash
---config.data.preload_to_memory=True --config.data.keep_open=False
-```
-
-## Verification Before Finalizing Changes
-
-Always run at least:
-
-```bash
-python -m compileall -q icil_jax_rlbench
-```
-
-Check standalone constraint:
-
-```bash
-rg "from icil(\.|\s)|import icil(\.|\s)|icil_jax_query_memory|diagnostics|metaworld" icil_jax_rlbench
-```
-
-If touching model or training logic, run a tiny smoke step on real cache if available:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/pretrain_direct_regression.py \
-  --config=icil_jax_rlbench/configs/pretrain_perceiver.py \
-  --config.train.num_steps=1 \
-  --config.train.batch_size=1 \
-  --config.train.log_every=1 \
-  --config.train.ckpt_every=1 \
-  --config.train.checkpoint_dir=/tmp/icil_jax_rlbench_smoke \
-  --config.data.K=2 \
-  --config.data.L=2 \
-  --config.data.H=4 \
-  --config.data.traj_len=8 \
-  --config.model.encoder.use_rgb=False \
-  --config.model.encoder.d_model=32 \
-  --config.model.encoder.n_heads=4 \
-  --config.model.encoder.frame_num_latents=2 \
-  --config.model.encoder.query_num_latents=2 \
-  --config.model.encoder.support_num_latents=4 \
-  --config.model.decoder.n_layers=1
-```
-
-For MAML changes, also smoke-test one tiny full second-order step:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/param_maml_direct_regression.py \
-  --config=icil_jax_rlbench/configs/param_maml_perceiver.py \
-  --config.train.num_steps=1 \
-  --config.train.batch_size=1 \
-  --config.train.log_every=1 \
-  --config.train.ckpt_every=1 \
-  --config.train.checkpoint_dir=/tmp/icil_jax_rlbench_param_smoke \
-  --config.data.K=2 \
-  --config.data.L=2 \
-  --config.data.H=4 \
-  --config.data.traj_len=8 \
-  --config.model.encoder.use_rgb=False \
-  --config.model.encoder.d_model=32 \
-  --config.model.encoder.n_heads=4 \
-  --config.model.encoder.frame_num_latents=2 \
-  --config.model.encoder.query_num_latents=2 \
-  --config.model.encoder.support_num_latents=4 \
-  --config.model.decoder.n_layers=1 \
-  --config.maml.inner_steps=1 \
-  --config.maml.num_inner_queries=1 \
-  --config.maml.num_query_loss_samples=1 \
-  --config.maml.first_order=False
-```
+- `data/metaworld_hidden_goal.py`: task-aware phi cache, normalization, and
+  support/query samplers shared by ML1 Reach and ML1 Push.
+- `train/metaworld_query_runner.py`: support-free MetaWorld behavior cloning.
+- `eval/metaworld_hidden_goal_gate1.py`: ordinary-adaptation upper bound.
+- `eval/metaworld_hidden_goal_ttt.py`: held-out fast-weight support controls.
+- `eval/metaworld_policy.py`: JAX implementation of the phi policy interface.
+- `data/hidden_goal.py`: controlled environment, task splits, normalization,
+  samplers, and integrity checks.
+- `models/fast_weight_ttt.py`: state-policy KVB WRITE and gated READ.
+- `train/ttt_step.py`: full/FOMAML meta-objectives and train steps.
+- `train/ttt_runner.py`: training, validation, provenance, checkpoints, resume.
+- `eval/ttt_state_gate1.py`: ordinary-adaptation upper bound.
+- `eval/ttt_state_gate2.py`: implementation-correctness overfit gate.
+- `eval/ttt_state.py`: held-out closed-loop support controls.
+- `models/ttt_supernode.py`: self-contained RLBench visual register encoder.
+- `models/robotics_actions.py`: RLBench action encoding and component losses.
+- `data/h5_cache.py`: retained dense-cache reader for the later visual phase.
+
+## Controlled Benchmark Contract
+
+The controlled scientific experiments use the `phi_mujoco`
+`metaworld_ml1_reach` and `metaworld_ml1_push` integrations: 40/10/50 disjoint
+tasks, hidden goal slots, 39D state, and 4D continuous action. Never pass task
+IDs or provenance goals to the model. Fit observation and action normalization
+only from training-task episodes. Support, offline query, and fresh closed-loop
+query starts must not overlap.
+
+The synthetic diagnostic has a 2D goal excluded from `[x, y, gripper, phase]`
+and a normalized planar-delta-plus-binary-gripper action. Its train,
+validation, and test goals are also disjoint.
+
+Meta-batches retain explicit task, support-demo, support-time, query-demo, and
+query-time axes. Do not collapse those semantic axes in the sampler.
+
+## RLBench Contract
+
+The later visual path uses dense H5 episodes with `xyz`, `valid`, `state`, and
+`action`, plus optional `rgb` and `mask_id`. Infer dimensions with
+`RLBenchCacheStore.infer_dims()`.
+
+Use space-time supernodes, separate state/action/time token types, and small event
+registers. Query encoding must not accept demonstrated query actions. Use delta
+translation, continuous 6D rotation with geodesic loss, and gripper BCE.
 
 ## Coding Guidelines
 
-- Prefer simple, explicit JAX/Flax code over clever abstractions.
-- Keep tensor shape comments near nontrivial reshapes/scans/vmaps.
-- Avoid dynamic shapes inside jitted/pmap code.
-- Any new optional metric should be behind a config flag if it requires extra forward computation or attention weight materialization.
-- Keep configs in `configs/base.py` as the source of defaults; wrapper configs should stay thin.
-- Preserve ASCII-only source unless there is a concrete reason not to.
-- Do not commit generated `__pycache__`, temporary checkpoints, W&B outputs, or smoke-test artifacts.
+- Prefer explicit functional JAX code and static shapes inside JIT/pmap.
+- Keep shape comments near nontrivial reshapes, scans, and vmaps.
+- Add abstractions only when they remove real duplication or clarify semantics.
+- Keep source ASCII and comments concise.
+- Use `apply_patch` for manual edits.
+- Do not commit generated outputs, checkpoints, caches, W&B data, or bytecode.
 
-## Known Limitations / Open Work
+## Verification
 
-- Online RLBench rollout eval exists for pretrained direct-regression and param-MAML/FOMAML direct-regression checkpoints.
-- No old checkpoint conversion.
-- Direct-regression only; no full old ICIL feature parity.
-- Supernode tokenizer is a deterministic soft-pooling implementation, not a byte-for-byte clone of any old tokenizer.
-- Training supports background batch prefetch workers; preload still helps avoid repeated H5 I/O on small enough caches.
+Always run:
+
+```bash
+uv run --frozen --group metaworld python -m compileall -q icil_jax_rlbench tests
+uv run --frozen --group metaworld pytest -q
+rg -n "^(from|import) (icil|icil_jax_query_memory|diagnostics|metaworld)(\\.|\\s|$)" \
+  icil_jax_rlbench tests
+```
+
+For model or training changes, also run Gate 2 or a one-step TTT smoke job. For
+visual changes, run `tests/test_ttt_supernode.py` and
+`tests/test_robotics_actions.py`.
