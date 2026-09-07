@@ -51,6 +51,7 @@ urdfs/
 rlbench/
 urdfs/
 contextual_tasks/
+datasets/
 
 # Slurm / sbatch logs
 slurm-*.out
