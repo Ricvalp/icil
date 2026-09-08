@@ -1,6 +1,19 @@
 # Fast-Weight Test-Time Training for Robot Imitation
 
-This branch implements the adaptation-only fast-weight TTT program in
+The current QuickDraw experiment trains supervised autoregressive and diffusion
+Transformers with nearest-neighbor sketch demonstrations across all 345
+categories. Follow the [full-dataset guide](icil_jax_rlbench/quickdraw/FULL_DATASET.md)
+for the prepared data, training, direct W&B logging, resume, and evaluation.
+
+The `quick-robot-draw` branch also retains the QuickDraw diversity diagnostic:
+neighborhood-conditioned generation (A-NN/A-local), program reproduction in public
+frames (B1), and executed closed-loop pen control (B2). See the
+[QuickDraw guide](icil_jax_rlbench/quickdraw/README.md) for preparation, training,
+controls, offline metrics, and the current validation status.
+The [neighborhood correction guide](icil_jax_rlbench/quickdraw/NEIGHBORHOODS.md)
+covers frozen embeddings, split-local FAISS indexes, and fixed-category N sweeps.
+
+The controlled robotics experiments implement the adaptation-only fast-weight TTT program in
 `ICIL_TTT_IMPLEMENTATION_PLAN.md`. The former direct-regression pretraining,
 parameter-MAML, and memory-MAML paths have been removed deliberately.
 

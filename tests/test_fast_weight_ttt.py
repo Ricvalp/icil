@@ -282,6 +282,22 @@ def test_full_second_order_is_finite_with_fully_padded_write_segment():
         assert bool(jnp.all(jnp.isfinite(leaf)))
 
 
+def test_empty_state_write_segment_is_exact_noop_with_drift_regularization():
+    batch, model_cfg, adapt_cfg, params = _setup()
+    adapt_cfg = TTTAdaptConfig(**{**adapt_cfg.__dict__, 'fast_drift_weight': 0.7})
+    support = _one_task(batch['support'])
+    short = {name: support[name][:, :2] for name in
+             ('observation', 'action', 'next_observation', 'write_mask')}
+    padded = {**support, 'write_mask': support['write_mask'].at[:, 2:].set(False)}
+    expected, _ = adapt_fast_state(params, short, model_cfg, adapt_cfg)
+    actual, trace = adapt_fast_state(params, padded, model_cfg, adapt_cfg)
+    for left, right in zip(jax.tree_util.tree_leaves(expected), jax.tree_util.tree_leaves(actual)):
+        np.testing.assert_array_equal(left, right)
+    assert float(trace['fast_update_norm'][-1]) == 0.0
+    gradient = _gradient(params, batch, model_cfg, adapt_cfg)
+    assert all(bool(jnp.all(jnp.isfinite(value))) for value in jax.tree_util.tree_leaves(gradient))
+
+
 def test_single_device_jit_and_pmap_steps_agree():
     if jax.local_device_count() != 1:
         pytest.skip('This comparison intentionally isolates one-device pmap semantics.')

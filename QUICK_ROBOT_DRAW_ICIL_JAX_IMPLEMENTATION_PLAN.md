@@ -1,5 +1,12 @@
 # Quick, Robot, Draw! diversity experiments inside ICIL/JAX
 
+**Active correction (8 September 2026):** Read
+[the neighborhood addendum](QUICK_ROBOT_DRAW_ICIL_JAX_NEIGHBORHOOD_CORRECTION.md)
+with this plan. Its A-NN/A-local task definitions, permitted offline classifier
+curation, splits, diversity axes, controls, and acceptance criteria supersede
+the conflicting category-only instructions below. The working branch is
+`quick-robot-draw`, as explicitly selected by the user after merging main.
+
 ## Codex implementation brief for `Ricvalp/icil:fast-weight-ttt`
 
 **Prepared:** 7 September 2026.  

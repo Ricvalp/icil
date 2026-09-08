@@ -132,6 +132,11 @@ def init_fast_weight_ttt_params(
             (int(cfg.hidden_dim),), float(cfg.gate_init), dtype=jnp.float32
         ),
     }
+    params.update(_init_fast_variables(keys, cfg))
+    return params
+
+
+def _init_fast_variables(keys, cfg: FastWeightTTTConfig) -> Dict[str, PyTree]:
     if str(cfg.fast_model) == 'linear':
         fast_init = {
             'linear': _linear_init(next(keys), int(cfg.fast_dim), int(cfg.fast_dim), scale=0.1)
@@ -145,13 +150,33 @@ def init_fast_weight_ttt_params(
                 next(keys), int(cfg.fast_hidden_dim), int(cfg.fast_dim), scale=0.1
             ),
         }
-    params['fast_init'] = fast_init
     raw_rate = _inverse_softplus(
         max(float(cfg.inner_lr_init) - float(cfg.inner_lr_min), 1e-8)
     )
-    params['inner_lr_raw'] = jax.tree_util.tree_map(
-        lambda _: raw_rate, fast_init
+    return {
+        'fast_init': fast_init,
+        'inner_lr_raw': jax.tree_util.tree_map(lambda _: raw_rate, fast_init),
+    }
+
+
+def init_fast_adapter_params(
+    rng: jax.Array, cfg: FastWeightTTTConfig
+) -> Dict[str, PyTree]:
+    """Initialize only the domain-independent KVB writer and fast READ adapter."""
+    if str(cfg.fast_model) not in ('linear', 'mlp'):
+        raise ValueError("fast_model must be 'linear' or 'mlp'.")
+    keys = iter(jax.random.split(rng, 8))
+    params = {
+        name: _linear_init(next(keys), int(cfg.hidden_dim), int(cfg.fast_dim))
+        for name in ('key_projection', 'value_projection', 'query_projection')
+    }
+    params['read_projection'] = _linear_init(
+        next(keys), int(cfg.fast_dim), int(cfg.hidden_dim)
     )
+    params['read_gate'] = jnp.full(
+        (int(cfg.hidden_dim),), float(cfg.gate_init), dtype=jnp.float32
+    )
+    params.update(_init_fast_variables(keys, cfg))
     return params
 
 
@@ -400,6 +425,33 @@ def _clip_each_fast_tensor(tree: PyTree, max_norm: float) -> PyTree:
     return jax.tree_util.tree_map(clip, tree)
 
 
+def apply_fast_gradient(
+    state: PyTree, gradient: PyTree, rates: PyTree, cfg: TTTAdaptConfig
+) -> Tuple[PyTree, PyTree, PyTree]:
+    """Apply the shared full/FOMAML, per-tensor rate and clipping rule."""
+    gradient = _clip_each_fast_tensor(gradient, float(cfg.fast_grad_clip_norm))
+    if bool(cfg.first_order):
+        gradient = jax.tree_util.tree_map(jax.lax.stop_gradient, gradient)
+    update = jax.tree_util.tree_map(
+        lambda rate, grad: -rate.astype(grad.dtype) * grad, rates, gradient
+    )
+    update = _clip_each_fast_tensor(update, float(cfg.fast_update_clip_norm))
+    next_state = jax.tree_util.tree_map(
+        lambda value, delta: value + delta, state, update
+    )
+    return next_state, gradient, update
+
+
+def fast_drift_penalty(state: PyTree, initial: PyTree) -> jax.Array:
+    """Squared distance with finite higher derivatives at the initialization."""
+    return sum(
+        jnp.sum(jnp.square(value - origin))
+        for value, origin in zip(
+            jax.tree_util.tree_leaves(state), jax.tree_util.tree_leaves(initial)
+        )
+    )
+
+
 def _path_name(path) -> str:
     return '/'.join(str(getattr(entry, 'key', entry)) for entry in path)
 
@@ -447,10 +499,10 @@ def write_loss(
     else:
         raise ValueError("write_objective must be 'kvb' or 'action_bc'.")
     if float(adapt_cfg.fast_drift_weight) > 0.0:
-        loss = loss + float(adapt_cfg.fast_drift_weight) * jnp.square(
-            tree_difference_norm(fast_state, fast_initial)
+        loss = loss + float(adapt_cfg.fast_drift_weight) * fast_drift_penalty(
+            fast_state, fast_initial
         )
-    return loss
+    return jnp.where(jnp.any(mask), loss, jnp.zeros_like(loss))
 
 
 def _flatten_support(support: Mapping[str, jax.Array]) -> Dict[str, jax.Array]:
@@ -522,21 +574,8 @@ def adapt_fast_state(
                 fast_initial,
             )
             raw_gradient_norm = tree_l2_norm(gradient)
-            gradient = _clip_each_fast_tensor(
-                gradient, float(adapt_cfg.fast_grad_clip_norm)
-            )
-            if bool(adapt_cfg.first_order):
-                gradient = jax.tree_util.tree_map(jax.lax.stop_gradient, gradient)
-            update = jax.tree_util.tree_map(
-                lambda rate, grad: -rate.astype(grad.dtype) * grad,
-                learning_rates,
-                gradient,
-            )
-            update = _clip_each_fast_tensor(
-                update, float(adapt_cfg.fast_update_clip_norm)
-            )
-            next_state = jax.tree_util.tree_map(
-                lambda value, delta: value + delta, state, update
+            next_state, gradient, update = apply_fast_gradient(
+                state, gradient, learning_rates, adapt_cfg
             )
             metrics = {
                 'write_loss': loss,
@@ -604,31 +643,18 @@ def adapt_encoded_support(
             reconstruction = fast_model_apply(state, key, model_cfg)
             loss = _masked_mean(jnp.square(reconstruction - value), mask)
             if float(adapt_cfg.fast_drift_weight) > 0.0:
-                loss = loss + float(adapt_cfg.fast_drift_weight) * jnp.square(
-                    tree_difference_norm(state, fast_initial)
+                loss = loss + float(adapt_cfg.fast_drift_weight) * fast_drift_penalty(
+                    state, fast_initial
                 )
-            return loss
+            return jnp.where(jnp.any(mask), loss, jnp.zeros_like(loss))
 
         state = fast_state
         accumulated = None
         for _ in range(int(adapt_cfg.write_steps_per_segment)):
             loss, gradient = jax.value_and_grad(loss_fn)(state)
             raw_gradient_norm = tree_l2_norm(gradient)
-            gradient = _clip_each_fast_tensor(
-                gradient, float(adapt_cfg.fast_grad_clip_norm)
-            )
-            if bool(adapt_cfg.first_order):
-                gradient = jax.tree_util.tree_map(jax.lax.stop_gradient, gradient)
-            update = jax.tree_util.tree_map(
-                lambda rate, grad: -rate.astype(grad.dtype) * grad,
-                rates,
-                gradient,
-            )
-            update = _clip_each_fast_tensor(
-                update, float(adapt_cfg.fast_update_clip_norm)
-            )
-            state = jax.tree_util.tree_map(
-                lambda value, delta: value + delta, state, update
+            state, gradient, update = apply_fast_gradient(
+                state, gradient, rates, adapt_cfg
             )
             metrics = {
                 'write_loss': loss,

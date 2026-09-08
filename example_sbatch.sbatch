@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=bc_block3_beta_a
+#SBATCH --partition=gpuq
+#SBATCH --gres=gpu:1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
+#SBATCH --time=30:00:00
+#SBATCH --output=hpc/logs/%x_%j.out
+#SBATCH --error=hpc/logs/%x_%j.err
