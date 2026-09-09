@@ -1,7 +1,9 @@
 # QuickDraw on peano: one H200 for 12 hours
 
 The supplied SSH host is `peano` (`rvalperga@10.0.31.201`). These commands use
-`~/icil` on that host. SSH from the workstation timed out during preparation,
+`~/icil` for the repository and
+`/hpc/home/phi/rvalperga/data/quickdraw_full_nn_v1` for the training dataset.
+SSH from the workstation timed out during preparation,
 so the remote filesystem, quota, network policy, and Slurm resource names have
 not been verified. Connect to the required network/VPN first. If the cluster
 requires a project or scratch directory, substitute that directory consistently
@@ -18,9 +20,12 @@ The job also checks that JAX sees exactly one H200 before training.
 
 Run on the workstation:
 
+Skip these transfers if the repository is already cloned and the dataset is
+already present at the path above.
+
 ```bash
 cd /home/rvalperga/icil
-ssh peano 'mkdir -p ~/icil/datasets ~/icil/hpc/logs && df -h ~/icil'
+ssh peano 'mkdir -p ~/icil/hpc/logs /hpc/home/phi/rvalperga/data && df -h /hpc/home/phi/rvalperga/data'
 
 rsync -a --info=progress2 \
   --exclude='__pycache__/' --exclude='*.pyc' --exclude='logs/' \
@@ -29,7 +34,7 @@ rsync -a --info=progress2 \
 
 rsync -a --partial --info=progress2 \
   datasets/quickdraw_full_nn_v1/ \
-  peano:~/icil/datasets/quickdraw_full_nn_v1/
+  peano:/hpc/home/phi/rvalperga/data/quickdraw_full_nn_v1/
 ```
 
 The second transfer is **7,513,038,034 bytes (7.51 GB), 2,086 files**. Copy the
@@ -75,6 +80,9 @@ submission. Images and metrics are retained locally for a later `wandb sync`.
 ## 3. Submit either architecture
 
 On peano, from `~/icil`:
+
+The batch file passes the dataset path above to either trainer. If it moves,
+set `QUICKDRAW_DATASET_ROOT` to its new absolute path before submission.
 
 ```bash
 bash hpc/submit_quickdraw_h200.sh ar
@@ -186,6 +194,7 @@ test selections). It is not needed for training or the already-frozen evaluation
 
 ```bash
 cd /home/rvalperga/icil
+ssh peano 'mkdir -p ~/icil/datasets'
 rsync -a --partial --info=progress2 \
   datasets/quickdraw_embeddings_v1/ peano:~/icil/datasets/quickdraw_embeddings_v1/
 ```

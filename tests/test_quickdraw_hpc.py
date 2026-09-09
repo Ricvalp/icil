@@ -68,17 +68,19 @@ def test_batch_job_requests_twelve_hours_and_forwards_offline_mode_without_insta
     assert '#SBATCH --time=12:00:00' in directives
     assert '#SBATCH --gres=gpu:h200:1' in directives
     assert '#SBATCH --nodes=1' in directives and '#SBATCH --ntasks=1' in directives
+    assert '/hpc/home/phi/rvalperga/data/quickdraw_full_nn_v1' in script.read_text()
     python = root / '.venv/bin/python'
     python.parent.mkdir(parents=True)
     python.touch(mode=0o700)
     config = root / 'icil_jax_rlbench/configs/quickdraw_ar_transformer.py'
     config.parent.mkdir(parents=True)
     config.touch()
-    manifest = root / 'datasets/quickdraw_full_nn_v1/manifest.json'
+    manifest = root.parent / 'external data/quickdraw_full_nn_v1/manifest.json'
     manifest.parent.mkdir(parents=True)
     manifest.write_text('{}')
     result = subprocess.run(['bash', str(script), 'ar', '--resume'],
-        env={**env, 'SLURM_SUBMIT_DIR': str(root), 'WANDB_MODE': 'offline'},
+        env={**env, 'SLURM_SUBMIT_DIR': str(root), 'WANDB_MODE': 'offline',
+             'QUICKDRAW_DATASET_ROOT': str(manifest.parent)},
         capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in result.stdout.splitlines()]
@@ -86,4 +88,5 @@ def test_batch_job_requests_twelve_hours_and_forwards_offline_mode_without_insta
     assert calls[1] == ['--ntasks=1', '.venv/bin/python', '-u', '-m',
         'icil_jax_rlbench.quickdraw.supervised_train', '--config',
         'icil_jax_rlbench/configs/quickdraw_ar_transformer.py', '--set',
+        f'dataset_root="{manifest.parent}"', '--set',
         'wandb_mode="offline"', '--resume']

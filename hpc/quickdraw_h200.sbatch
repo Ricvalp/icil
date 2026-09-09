@@ -23,8 +23,13 @@ case "$architecture" in
     *) printf 'Use ar or diffusion, followed by optional trainer arguments.\n' >&2; exit 2 ;;
 esac
 
-if [[ ! -x .venv/bin/python || ! -f "$config" || ! -f datasets/quickdraw_full_nn_v1/manifest.json ]]; then
-    printf 'Missing environment, code, or dataset. Follow hpc/README.md before submitting.\n' >&2
+dataset_root="${QUICKDRAW_DATASET_ROOT:-/hpc/home/phi/rvalperga/data/quickdraw_full_nn_v1}"
+if [[ ! -x .venv/bin/python || ! -f "$config" ]]; then
+    printf 'Missing environment or code. Follow hpc/README.md before submitting.\n' >&2
+    exit 1
+fi
+if [[ ! -f "$dataset_root/manifest.json" ]]; then
+    printf 'Dataset manifest not found: %s/manifest.json\n' "$dataset_root" >&2
     exit 1
 fi
 
@@ -54,4 +59,5 @@ PY
 # --resume pass through to the trainer; existing hyperparameters stay intact.
 exec srun --ntasks=1 .venv/bin/python -u \
     -m icil_jax_rlbench.quickdraw.supervised_train \
-    --config "$config" --set "wandb_mode=\"$wandb_mode\"" "$@"
+    --config "$config" --set "dataset_root=\"$dataset_root\"" \
+    --set "wandb_mode=\"$wandb_mode\"" "$@"
