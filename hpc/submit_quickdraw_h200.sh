@@ -3,10 +3,11 @@
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$repo_root"
-architecture="${1:-ar}"
-case "$architecture" in
-    ar|autoregressive|diffusion) ;;
-    *) printf 'Usage: bash hpc/submit_quickdraw_h200.sh [ar|diffusion] [trainer arguments]\n' >&2; exit 2 ;;
+mode="${1:-ar}"
+case "$mode" in
+    ar|autoregressive|diffusion) batch_script=hpc/quickdraw_h200.sbatch ;;
+    visualize|fid) batch_script=hpc/quickdraw_evaluate_h200.sbatch ;;
+    *) printf 'Usage: bash hpc/submit_quickdraw_h200.sh [ar|diffusion|visualize|fid] [arguments]\n' >&2; exit 2 ;;
 esac
 
 gpu_arguments_text="$(sinfo --noheader --partition=gpuq --format='%G|%f' | python3 -c '
@@ -30,5 +31,5 @@ else:
 mapfile -t gpu_arguments <<< "$gpu_arguments_text"
 mkdir -p hpc/logs
 printf 'Submitting one 12-hour H200 job: %s\n' "${gpu_arguments[*]}"
-exec sbatch "${gpu_arguments[@]}" --job-name="quickdraw_${architecture}" \
-    hpc/quickdraw_h200.sbatch "$@"
+exec sbatch "${gpu_arguments[@]}" --job-name="quickdraw_${mode}" \
+    "$batch_script" "$@"

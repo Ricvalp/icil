@@ -4,7 +4,7 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -210,3 +210,74 @@ def test_plot_files_are_kept_without_wandb_and_small_runs_do_not_force_uploads(d
     rows = [row for row in payload['extra']['history'] if 'samples/context_and_generated' in row]
     assert [row['optimizer_step'] for row in rows] == [2]
     assert (Path(cfg['output_dir']) / rows[0]['samples/context_and_generated']).is_file()
+
+
+@pytest.mark.parametrize('architecture', ['autoregressive', 'diffusion'])
+def test_periodic_fid_is_optional_replayable_and_preserves_training(dataset, tmp_path,
+                                                                  architecture, wandb_calls, monkeypatch):
+    from icil_jax_rlbench.quickdraw import supervised_fid as fid
+    reference = SimpleNamespace(identifier='fixed-reference', split='development')
+    monkeypatch.setattr(fid, 'load_reference', lambda *args: reference)
+    monkeypatch.setattr(fid, 'preflight', lambda *args, **kwargs: None)
+    evaluations = []
+
+    def evaluate(params, model_cfg, data, real, output, **kwargs):
+        assert real is reference and data.identifier == dataset.identifier
+        assert kwargs['seed'] == 2030
+        assert kwargs['selection_mode'] == 'sample_top_m'
+        assert model_cfg.architecture == architecture
+        # This evaluator has its own random stream and synchronizes live params.
+        noise = jax.random.normal(jax.random.PRNGKey(kwargs['seed']), (4,))
+        assert np.isfinite(float(noise.sum()) + float(jax.tree.leaves(params)[0].sum()))
+        evaluations.append(kwargs['optimizer_step'])
+        return {'sketch_fid': 3.25, 'generated_count': 20, 'reference_count': 20,
+                'elapsed_seconds': .1, 'statistics': {'empty_count': 1, 'invalid_fraction': 0.}}
+
+    monkeypatch.setattr(fid, 'evaluate_params', evaluate)
+    base = {**_config(dataset, tmp_path / 'fid-disabled', architecture),
+            'plot_every': 0, 'max_steps': 5}
+    baseline = load_checkpoint(training.train(base))
+    assert evaluations == []
+    cfg = {**base, 'output_dir': str(tmp_path / 'fid-enabled'),
+           'fid_enabled': True, 'fid_every': 2}
+    interrupted = training.train({**cfg, 'max_steps': 3})
+    resumed = load_checkpoint(training.train({**cfg, 'resume_path': str(interrupted)}))
+    assert evaluations == [2, 4]
+    for name in ('params', 'opt_state', 'rng'):
+        for left, right in zip(jax.tree.leaves(baseline[name]), jax.tree.leaves(resumed[name])):
+            np.testing.assert_array_equal(left, right)
+    rows = [row for row in resumed['extra']['history'] if 'validation/sketch_fid' in row]
+    assert [row['optimizer_step'] for row in rows] == [2, 4]
+    assert all(row['validation/sketch_fid'] == 3.25 for row in rows)
+    assert all(row['validation/fid_empty_count'] == 1 for row in rows)
+    uploaded = [row for run in wandb_calls[1:] for row in run.rows if 'validation/sketch_fid' in row]
+    assert uploaded == rows  # Resume does not re-upload the historical metric.
+    with pytest.raises(ValueError, match='reference and seed fixed'):
+        training.train({**cfg, 'max_steps': 6, 'resume_path': str(interrupted), 'fid_seed': 99})
+    # Checkpoint-only restoration must retain the fixed metric identity too.
+    (Path(cfg['output_dir']) / 'fid/selection.json').unlink()
+    with pytest.raises(ValueError, match='reference and seed fixed'):
+        training.train({**cfg, 'max_steps': 6, 'resume_path': str(interrupted), 'fid_seed': 99})
+
+
+def test_fid_resume_migration_and_config_validation():
+    current = training._execution_signature()
+    previous = {**current, 'source_hashes': {
+        **current['source_hashes'], 'supervised_train.py': training.PRE_FID_TRAINER_SHA256}}
+    assert training._compatible_execution(previous, current)
+    old_cfg = {key: value for key, value in training.default_config().items() if not key.startswith('fid_')}
+    assert training._scientific_config(training.resolve_config(old_cfg)) == training._scientific_config(old_cfg)
+    assert training.default_config()['fid_every'] == 10000
+    assert training.default_config()['fid_enabled'] is False
+    for invalid in ({'fid_enabled': 'false'}, {'fid_every': 0}, {'fid_batch_size': 0},
+                    {'fid_feature_batch_size': -1}, {'fid_seed': -1}, {'fid_seed': 2 ** 32},
+                    {'fid_keep_artifacts': 1}):
+        with pytest.raises(ValueError, match='fid_'):
+            training.resolve_config(invalid)
+
+
+def test_training_fid_refuses_test_references(dataset, tmp_path, monkeypatch):
+    from icil_jax_rlbench.quickdraw import supervised_fid as fid
+    monkeypatch.setattr(fid, 'load_reference', lambda *args: SimpleNamespace(split='test'))
+    with pytest.raises(ValueError, match='development references'):
+        training._prepare_training_fid({**training.default_config(), 'fid_enabled': True}, dataset, tmp_path)

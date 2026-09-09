@@ -152,6 +152,11 @@ rsync -a --partial --info=progress2 \
 
 ## Optional: evaluation resources on the HPC
 
+For the newer 10-example context panels, 10x10 galleries, and class-balanced
+34,500-sample Sketch-FID (including optional training logging), follow the
+[checkpoint evaluation guide](../icil_jax_rlbench/quickdraw/CHECKPOINT_EVALUATION.md).
+The following resources are for the earlier neighborhood-control evaluation.
+
 These are not needed to start training or log its plots. To run the existing
 frozen development generation/metric protocol on the HPC as well, copy:
 

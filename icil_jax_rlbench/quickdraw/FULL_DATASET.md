@@ -9,8 +9,10 @@ TTT configurations are separate experiments; their category and target caps do
 not apply to this workflow.
 
 All commands below run from `/home/rvalperga/icil`. Dataset construction is
-complete locally. Policy training has not been launched as a scientific run.
+complete locally. Policy training has subsequently been run on the HPC.
 For a 12-hour single-H200 job on peano, use the [HPC transfer and Slurm guide](../../hpc/README.md).
+For checkpoint context panels, a 100-sample gallery, standalone Sketch-FID and
+optional periodic metric logging, use the [checkpoint evaluation guide](CHECKPOINT_EVALUATION.md).
 
 ## Prepared data and full retrieval coverage
 
@@ -174,9 +176,9 @@ uv run --frozen --group metaworld --extra cuda12 --extra wandb \
 Resume restores the optimizer, RNG, epoch/shuffle position, metrics, and exposure
 counts from the original run directory. Model, sampling, optimizer, validation,
 source code, dependency versions, backend, and device signature must match.
-The known trainer version immediately preceding periodic plotting can also
-resume: this observational upgrade preserves the numerical training path and
-writes `plotting_upgrade.json`, while retaining the original provenance.
+The known trainer versions immediately preceding periodic plotting and FID can
+also resume: these observational upgrades preserve the numerical training path
+and write `evaluation_upgrade.json`, while retaining the original provenance.
 Increasing `epochs` extends training with the original learning-rate schedule;
 it does not restart or stretch that schedule. Repeat any original scientific
 `--set` overrides when resuming.

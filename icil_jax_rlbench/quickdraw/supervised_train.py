@@ -35,6 +35,7 @@ CHECKPOINT_TYPE = 'quickdraw_full_supervised_v1'
 # This reviewed predecessor differs only in observational plotting/logging.
 # Remove this migration if numerical training or data sampling changes.
 PRE_PLOT_TRAINER_SHA256 = '2bff18d7e4a07fa2a819675509903a3ff6de0727a00f320deaf313fbf22255b8'
+PRE_FID_TRAINER_SHA256 = '10ef761b5d78c4870c6c1f6a6501f16338eb54f3e58d0527416b2898312a5aae'
 BATCH_FIELDS = frozenset(('support_tokens', 'support_mask', 'query_tokens',
                          'query_mask', 'query_point_mask', 'example_mask'))
 
@@ -62,6 +63,14 @@ def default_config(architecture='autoregressive'):
         'validation_every_steps': 0, 'validation_examples_per_category': 0,
         'validation_seed': 1729, 'prefetch_batches': 2,
         'plot_every': 10000, 'plot_examples': 4, 'plot_seed': 2027,
+        'fid_enabled': False, 'fid_every': 10000,
+        'fid_reference_root': 'datasets/quickdraw_fid_development_v1',
+        'fid_seed': 2030, 'fid_batch_size': 8, 'fid_feature_batch_size': 64,
+        'fid_python': '.venv-quickdraw-metrics/bin/python',
+        'fid_donor_root': '../quick-robot-draw',
+        'fid_extractor_checkpoint': 'outputs/quickdraw_evaluator/resnet18_v1/resnet18_best.pt',
+        'fid_checkpoint_provenance': 'outputs/quickdraw_evaluator/resnet18_v1/provenance.json',
+        'fid_keep_artifacts': False,
         'resume_path': '', 'max_steps': None,
         'wandb_project': None, 'wandb_name': None, 'wandb_entity': None,
         'wandb_mode': 'online',
@@ -75,19 +84,25 @@ def resolve_config(value):
     cfg = {**default_config(), **dict(value)}
     cfg['model'] = asdict(SupervisedModelConfig(**cfg['model']))
     for name in ('epochs', 'batch_size', 'micro_batch_size', 'support_count',
-                 'log_every', 'checkpoint_every', 'prefetch_batches'):
+                 'log_every', 'checkpoint_every', 'prefetch_batches',
+                 'fid_every', 'fid_batch_size', 'fid_feature_batch_size'):
         if not isinstance(cfg[name], int) or cfg[name] < 1:
             raise ValueError(f'{name} must be a positive integer')
     if cfg['batch_size'] % cfg['micro_batch_size']:
         raise ValueError('batch_size must be divisible by micro_batch_size')
     for name in ('validation_every_steps', 'validation_examples_per_category', 'warmup_steps',
-                 'plot_every', 'plot_seed'):
+                 'plot_every', 'plot_seed', 'fid_seed'):
         if not isinstance(cfg[name], int) or cfg[name] < 0:
             raise ValueError(f'{name} must be a nonnegative integer')
     if not isinstance(cfg['plot_examples'], int) or not 1 <= cfg['plot_examples'] <= 8:
         raise ValueError('plot_examples must be an integer between 1 and 8')
     if cfg['plot_seed'] >= 2 ** 32:
         raise ValueError('plot_seed must fit an unsigned 32-bit integer')
+    if cfg['fid_seed'] >= 2 ** 32:
+        raise ValueError('fid_seed must fit an unsigned 32-bit integer')
+    for name in ('fid_enabled', 'fid_keep_artifacts'):
+        if not isinstance(cfg[name], bool):
+            raise ValueError(f'{name} must be a boolean')
     if cfg['max_steps'] is not None and cfg['max_steps'] < 1:
         raise ValueError('max_steps is an optional positive diagnostic limit')
     for name in ('learning_rate', 'min_learning_rate', 'weight_decay', 'grad_clip_norm'):
@@ -295,7 +310,8 @@ def _scientific_config(cfg):
                'log_every', 'checkpoint_every', 'prefetch_batches',
                'plot_every', 'plot_examples', 'plot_seed',
                'wandb_project', 'wandb_name', 'wandb_entity', 'wandb_mode'}
-    return {key: value for key, value in cfg.items() if key not in mutable}
+    return {key: value for key, value in cfg.items()
+            if key not in mutable and not key.startswith('fid_')}
 
 
 def _execution_signature():
@@ -315,7 +331,7 @@ def _compatible_execution(previous, current):
     if not isinstance(previous, dict):
         return False
     sources = previous.get('source_hashes', {})
-    if sources.get('supervised_train.py') != PRE_PLOT_TRAINER_SHA256:
+    if sources.get('supervised_train.py') not in (PRE_PLOT_TRAINER_SHA256, PRE_FID_TRAINER_SHA256):
         return False
     upgraded = {**previous, 'source_hashes': {
         **sources, 'supervised_train.py': current['source_hashes']['supervised_train.py']}}
@@ -333,6 +349,29 @@ def load_run(checkpoint, *, dataset_root=None):
     return payload, cfg, SupervisedModelConfig(**cfg['model']), dataset
 
 
+def _prepare_training_fid(cfg, dataset, output):
+    """Validate the optional evaluator before training; freeze the monitoring protocol."""
+    if not cfg['fid_enabled']:
+        return None
+    from .supervised_fid import load_reference, preflight
+    reference = load_reference(cfg['fid_reference_root'], dataset)
+    if reference.split != 'development':
+        raise ValueError('Training FID requires development references; test is for final evaluation')
+    preflight(reference, python=cfg['fid_python'], donor_root=cfg['fid_donor_root'],
+              extractor_checkpoint=cfg['fid_extractor_checkpoint'],
+              checkpoint_provenance=cfg['fid_checkpoint_provenance'] or None)
+    selection = {
+        'reference_id': reference.identifier, 'dataset_id': dataset.identifier,
+        'seed': cfg['fid_seed'], 'support_count': cfg['support_count'],
+        'selection_mode': cfg['selection_mode'],
+        'condition_on_support': cfg['condition_on_support'],
+    }
+    path = output / 'fid' / 'selection.json'
+    if path.exists() and json.loads(path.read_text()) != selection:
+        raise ValueError('Keep the FID reference and seed fixed within a training run')
+    return reference, selection
+
+
 def train(value):
     cfg = resolve_config(value)
     dataset = FullDataset.open(cfg['dataset_root'])
@@ -342,7 +381,12 @@ def train(value):
     train_rows = dataset.rows('train')
     steps_per_epoch = math.ceil(len(train_rows) / cfg['batch_size'])
     output = Path(cfg['output_dir']).resolve()
+    fid_context = _prepare_training_fid(cfg, dataset, output)
     payload = load_checkpoint(cfg['resume_path']) if cfg['resume_path'] else None
+    saved_fid_protocol = payload.get('extra', {}).get('fid_protocol') if payload else None
+    if fid_context is not None and saved_fid_protocol is not None and fid_context[1] != saved_fid_protocol:
+        raise ValueError('Keep the FID reference and seed fixed within a training run')
+    fid_protocol = fid_context[1] if fid_context is not None else saved_fid_protocol
     execution = _execution_signature()
     if cfg['schedule_steps'] is None:
         cfg['schedule_steps'] = (payload['config']['schedule_steps'] if payload
@@ -388,6 +432,11 @@ def train(value):
     if epoch >= cfg['epochs'] or (cfg['max_steps'] and int(state.step) >= cfg['max_steps']):
         raise ValueError('The requested training budget is already complete')
     output.mkdir(parents=True, exist_ok=True)
+    if fid_context is not None:
+        selection_path = output / 'fid' / 'selection.json'
+        selection_path.parent.mkdir(parents=True, exist_ok=True)
+        if not selection_path.exists():
+            _json(selection_path, fid_context[1])
     provenance = {
         'checkpoint_type': CHECKPOINT_TYPE, 'dataset_id': dataset.identifier,
         'dataset_manifest': str(dataset.root / 'manifest.json'),
@@ -406,8 +455,8 @@ def train(value):
     if not payload:
         _json(output / 'provenance.json', provenance)
     elif extra['execution'] != execution:
-        _json(output / 'plotting_upgrade.json', {
-            'change': 'periodic_fixed_development_plots_with_independent_rng',
+        _json(output / 'evaluation_upgrade.json', {
+            'change': 'periodic_development_plots_and_optional_fid_with_independent_rng',
             'checkpoint_step': int(state.step), 'previous_execution': extra['execution'],
             'current_execution': execution,
         })
@@ -464,6 +513,7 @@ def train(value):
             save_checkpoint(output / name, state=state, step=step, config=cfg, replicated=False,
                 extra={'checkpoint_type': CHECKPOINT_TYPE, 'dataset_id': dataset.identifier,
                        'execution': execution,
+                       'fid_protocol': fid_protocol,
                        'next_epoch': epoch, 'next_batch': offset, 'history': history,
                        'best_validation_loss': best_loss, 'exposure': exposure,
                        'epoch_totals': epoch_totals, 'epoch_count': epoch_count})
@@ -509,6 +559,35 @@ def train(value):
             print(f'step {step:,} | saved {output / relative}', flush=True)
             window_started = time.monotonic()
 
+        def evaluate_fid():
+            nonlocal window_started
+            from .supervised_fid import evaluate_params
+            relative = f'fid/step_{step:09d}'
+            print(f'step {step:,} | evaluating class-balanced development Sketch-FID ...', flush=True)
+            result = evaluate_params(
+                state.params, model_cfg, dataset, fid_context[0], output / relative,
+                support_count=cfg['support_count'], selection_mode=cfg['selection_mode'],
+                condition_on_support=cfg['condition_on_support'], seed=cfg['fid_seed'],
+                batch_size=cfg['fid_batch_size'], python=cfg['fid_python'],
+                donor_root=cfg['fid_donor_root'],
+                extractor_checkpoint=cfg['fid_extractor_checkpoint'],
+                checkpoint_provenance=cfg['fid_checkpoint_provenance'] or None,
+                feature_batch_size=cfg['fid_feature_batch_size'],
+                keep_artifacts=cfg['fid_keep_artifacts'], optimizer_step=step)
+            row = {'optimizer_step': step, 'epoch': epoch + offset / steps_per_epoch,
+                   'validation/sketch_fid': result['sketch_fid'],
+                   'validation/fid_generated_count': result['generated_count'],
+                   'validation/fid_reference_count': result['reference_count'],
+                   'validation/fid_seconds': result['elapsed_seconds']}
+            row.update({'validation/fid_' + name: value
+                        for name, value in result['statistics'].items()
+                        if isinstance(value, (int, float))})
+            record(row)
+            print(f"step {step:,} | Sketch-FID={result['sketch_fid']:.5f} | "
+                  f"{result['generated_count']:,} generated sketches | "
+                  f"{result['elapsed_seconds']:.1f}s", flush=True)
+            window_started = time.monotonic()
+
         while epoch < cfg['epochs'] and (cfg['max_steps'] is None or step < cfg['max_steps']):
             order = np.random.default_rng(np.random.SeedSequence([cfg['seed'], epoch, 13])).permutation(train_rows)
             for batch_index, host in _batches(dataset, order, cfg, epoch, offset):
@@ -531,7 +610,8 @@ def train(value):
                 validation_due = cfg['validation_every_steps'] and step % cfg['validation_every_steps'] == 0
                 save_due = step % cfg['checkpoint_every'] == 0
                 plot_due = cfg['plot_every'] and step % cfg['plot_every'] == 0
-                if step % cfg['log_every'] == 0 or end_epoch or stop or validation_due or save_due or plot_due:
+                fid_due = cfg['fid_enabled'] and step % cfg['fid_every'] == 0
+                if step % cfg['log_every'] == 0 or end_epoch or stop or validation_due or save_due or plot_due or fid_due:
                     flush_window()
                 if end_epoch:
                     record({'optimizer_step': step, 'epoch': epoch + 1,
@@ -541,6 +621,8 @@ def train(value):
                     offset, epoch_totals, epoch_count = 0, {}, 0
                 if plot_due:
                     plot()
+                if fid_due:
+                    evaluate_fid()
                 if end_epoch or validation_due:
                     evaluate()
                 if end_epoch or save_due or stop:

@@ -15,7 +15,8 @@ def cluster(tmp_path):
     root = tmp_path / 'project'
     (root / 'hpc').mkdir(parents=True)
     scripts = Path(__file__).resolve().parents[1] / 'hpc'
-    for name in ('submit_quickdraw_h200.sh', 'quickdraw_h200.sbatch'):
+    for name in ('submit_quickdraw_h200.sh', 'quickdraw_h200.sbatch',
+                 'quickdraw_evaluate_h200.sbatch'):
         shutil.copyfile(scripts / name, root / 'hpc' / name)
     fake_bin = tmp_path / 'bin'
     fake_bin.mkdir()
@@ -61,6 +62,30 @@ def test_submission_refuses_missing_or_ambiguous_h200(cluster, resources):
     assert not result.stdout
 
 
+@pytest.mark.parametrize('mode', ['visualize', 'fid'])
+def test_submission_routes_checkpoint_evaluation_arguments(cluster, mode):
+    root, env = cluster
+    forwarded = ['--checkpoint', 'outputs/completed run/best.pkl', '--output', 'outputs/paper figures']
+    if mode == 'fid':
+        forwarded += ['--reference', '/data/frozen reference']
+    result = subprocess.run(['bash', str(root / 'hpc/submit_quickdraw_h200.sh'), mode, *forwarded],
+        cwd=root.parent, env={**env, 'CLUSTER_TEST_RESOURCES': 'gpu:H200:4|gpu_node'},
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    args = json.loads(result.stdout.splitlines()[-1])
+    assert args == ['--gres=gpu:H200:1', f'--job-name=quickdraw_{mode}',
+                    'hpc/quickdraw_evaluate_h200.sbatch', mode, *forwarded]
+
+
+def test_submission_without_arguments_still_defaults_to_ar(cluster):
+    root, env = cluster
+    result = subprocess.run(['bash', str(root / 'hpc/submit_quickdraw_h200.sh')],
+        env={**env, 'CLUSTER_TEST_RESOURCES': 'gpu:H200:4|gpu_node'}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    args = json.loads(result.stdout.splitlines()[-1])
+    assert args == ['--gres=gpu:H200:1', '--job-name=quickdraw_ar', 'hpc/quickdraw_h200.sbatch']
+
+
 def test_batch_job_requests_twelve_hours_and_forwards_offline_mode_without_installing(cluster):
     root, env = cluster
     script = root / 'hpc/quickdraw_h200.sbatch'
@@ -90,3 +115,38 @@ def test_batch_job_requests_twelve_hours_and_forwards_offline_mode_without_insta
         'icil_jax_rlbench/configs/quickdraw_ar_transformer.py', '--set',
         f'dataset_root="{manifest.parent}"', '--set',
         'wandb_mode="offline"', '--resume']
+
+
+@pytest.mark.parametrize('mode, module, subcommand', [
+    ('visualize', 'supervised_visualize', []),
+    ('fid', 'supervised_fid', ['evaluate']),
+])
+def test_evaluation_job_resources_and_argument_forwarding(cluster, mode, module, subcommand):
+    root, env = cluster
+    script = root / 'hpc/quickdraw_evaluate_h200.sbatch'
+    directives = {line for line in script.read_text().splitlines() if line.startswith('#SBATCH ')}
+    assert {'#SBATCH --time=12:00:00', '#SBATCH --gres=gpu:h200:1', '#SBATCH --nodes=1',
+            '#SBATCH --ntasks=1', '#SBATCH --cpus-per-task=16', '#SBATCH --mem=64G'} <= directives
+    assert '/hpc/home/phi/rvalperga/data/quickdraw_full_nn_v1' in script.read_text()
+    python = root / '.venv/bin/python'
+    python.parent.mkdir(parents=True)
+    python.touch(mode=0o700)
+    source = root / f'icil_jax_rlbench/quickdraw/{module}.py'
+    source.parent.mkdir(parents=True)
+    source.touch()
+    manifest = root.parent / 'external data/quickdraw_full_nn_v1/manifest.json'
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{}')
+    forwarded = ['--checkpoint', 'outputs/completed run/best.pkl', '--output', 'outputs/evaluation']
+    if mode == 'fid':
+        forwarded += ['--reference', '/data/frozen reference', '--batch-size', '8']
+    result = subprocess.run(['bash', str(script), mode, *forwarded],
+        env={**env, 'SLURM_SUBMIT_DIR': str(root), 'QUICKDRAW_DATASET_ROOT': str(manifest.parent)},
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(calls) == 2
+    assert calls[0] == ['--ntasks=1', '.venv/bin/python', '-u', '-']
+    assert calls[1] == ['--ntasks=1', '.venv/bin/python', '-u', '-m',
+        f'icil_jax_rlbench.quickdraw.{module}', *subcommand,
+        '--dataset-root', str(manifest.parent), *forwarded]
