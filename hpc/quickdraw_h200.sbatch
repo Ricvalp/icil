@@ -24,7 +24,13 @@ case "$architecture" in
     ar-heldout) config=icil_jax_rlbench/configs/quickdraw_ar_transformer_heldout.py ;;
     diffusion-heldout) config=icil_jax_rlbench/configs/quickdraw_diffusion_transformer_heldout.py ;;
     kvb-heldout) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_heldout.py ;;
-    *) printf 'Use ar, diffusion, kvb, ar-heldout, diffusion-heldout, or kvb-heldout, followed by optional trainer arguments.\n' >&2; exit 2 ;;
+    bc-heldout) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_heldout.py ;;
+    bc1-heldout) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_s1_heldout.py ;;
+    bc5-heldout) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_s5_heldout.py ;;
+    bc-fast128-heldout) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_fast128_heldout.py ;;
+    bc-large-heldout) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_large_heldout.py ;;
+    kvb-large-heldout) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_large_heldout.py ;;
+    *) printf 'Unknown experiment: %s. See hpc/README.md for submission modes.\n' "$architecture" >&2; exit 2 ;;
 esac
 
 dataset_root="${QUICKDRAW_DATASET_ROOT:-/hpc/home/phi/rvalperga/data/quickdraw_full_nn_v1}"

@@ -8,8 +8,14 @@ case "$mode" in
     ar|autoregressive|diffusion|kvb) batch_script=hpc/quickdraw_h200.sbatch ;;
     ar-heldout|diffusion-heldout) batch_script=hpc/quickdraw_icil_heldout_h200.sbatch ;;
     kvb-heldout) batch_script=hpc/quickdraw_kvb_heldout_h200.sbatch ;;
+    bc-heldout) batch_script=hpc/quickdraw_bc_heldout_h200.sbatch ;;
+    bc1-heldout) batch_script=hpc/quickdraw_bc1_heldout_h200.sbatch ;;
+    bc5-heldout) batch_script=hpc/quickdraw_bc5_heldout_h200.sbatch ;;
+    bc-fast128-heldout) batch_script=hpc/quickdraw_bc_fast128_heldout_h200.sbatch ;;
+    bc-large-heldout) batch_script=hpc/quickdraw_bc_large_heldout_h200.sbatch ;;
+    kvb-large-heldout) batch_script=hpc/quickdraw_kvb_large_heldout_h200.sbatch ;;
     visualize|fid) batch_script=hpc/quickdraw_evaluate_h200.sbatch ;;
-    *) printf 'Usage: bash hpc/submit_quickdraw_h200.sh [ar|diffusion|kvb|ar-heldout|diffusion-heldout|kvb-heldout|visualize|fid] [arguments]\n' >&2; exit 2 ;;
+    *) printf 'Unknown experiment: %s. See hpc/README.md for submission modes.\n' "$mode" >&2; exit 2 ;;
 esac
 
 gpu_arguments_text="$(sinfo --noheader --partition=gpuq --format='%G|%f' | python3 -c '

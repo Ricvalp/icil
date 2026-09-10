@@ -6,6 +6,11 @@ direct demonstration cross-attention, and no meta-learning. Its prepared data
 cover all 345 categories. Follow that guide for current launch commands; the
 bounded pilots and TTT commands below belong to separate experiments.
 
+Full-data fast-weight Transformer experiments use either [KVB WRITE](KVB_TRANSFORMER.md)
+or [support-BC WRITE](SUPPORT_BC_EXPERIMENTS.md), with full second-order gradients.
+The support-BC guide provides six H200 jobs comparing WRITE objectives, inner-step
+counts, and policy capacity under the same [35-class holdout](CLASS_HOLDOUT.md).
+
 This implementation lives on `quick-robot-draw`, created from the merged main
 line. It follows `QUICK_ROBOT_DRAW_ICIL_JAX_IMPLEMENTATION_PLAN.md`; its older
 branch name does not apply. [Implementation decisions](IMPLEMENTATION_NOTES.md)

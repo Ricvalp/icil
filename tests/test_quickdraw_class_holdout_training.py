@@ -12,7 +12,7 @@ import pytest
 
 from icil_jax_rlbench.quickdraw import class_split
 from icil_jax_rlbench.quickdraw import supervised_train as training
-from icil_jax_rlbench.quickdraw.kvb_models import KVBModelConfig
+from icil_jax_rlbench.quickdraw.policy_backend import model_config
 from icil_jax_rlbench.train.checkpoints import load_checkpoint
 from test_quickdraw_supervised_training import _config, dataset, wandb_calls
 
@@ -105,16 +105,16 @@ def test_saved_class_split_is_required_and_matches_restored_config(dataset):
     assert class_split.validate_saved_class_split(None, dataset, disabled)['heldout_category_count'] == 0
 
 
-@pytest.mark.parametrize('policy', ['autoregressive', 'diffusion', 'kvb'])
+@pytest.mark.parametrize('policy', ['autoregressive', 'diffusion', 'kvb', 'support_bc'])
 def test_class_disjoint_epoch_resume_and_validation(dataset, tmp_path, policy, wandb_calls):
-    architecture = 'autoregressive' if policy == 'kvb' else policy
+    architecture = 'autoregressive' if policy in ('kvb', 'support_bc') else policy
     cfg = {**_config(dataset, tmp_path / 'continuous', architecture),
            'heldout_category_count': 1, 'heldout_category_seed': 37,
            'support_count': 2, 'plot_every': 0}
-    if policy == 'kvb':
-        cfg.update(method='kvb')
-        cfg['model'] = asdict(KVBModelConfig(**cfg['model'], fast_dim=3,
-                                            fast_hidden_dim=5, inner_steps=3))
+    if policy in ('kvb', 'support_bc'):
+        cfg.update(method=policy)
+        cfg['model'] = asdict(model_config({**cfg['model'], 'fast_dim': 3,
+                                            'fast_hidden_dim': 5, 'inner_steps': 3}, policy))
     manifest = class_split.resolve_class_split(dataset, cfg)
     train_rows = class_split.split_rows(dataset, cfg, 'train')
     validation_rows = class_split.split_rows(dataset, cfg, 'development')

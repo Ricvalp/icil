@@ -1,4 +1,4 @@
-"""Shared policy dispatch for ordinary ICIL and fast-weight KVB experiments."""
+"""Shared policy dispatch for ordinary ICIL and fast-weight WRITE experiments."""
 
 from pathlib import Path
 
@@ -11,13 +11,18 @@ def model_config(value, method='icil'):
     if method == 'kvb':
         from .kvb_models import KVBModelConfig
         return KVBModelConfig(**value)
-    raise ValueError("method must be 'icil' or 'kvb'")
+    if method == 'support_bc':
+        from .support_bc_models import SupportBCModelConfig
+        return SupportBCModelConfig(**value)
+    raise ValueError("method must be 'icil', 'kvb', or 'support_bc'")
 
 
 def _backend(cfg):
     if type(cfg) is supervised_models.SupervisedModelConfig:
         return supervised_models
-    from . import kvb_models
+    from . import kvb_models, support_bc_models
+    if isinstance(cfg, support_bc_models.SupportBCModelConfig):
+        return support_bc_models
     if isinstance(cfg, kvb_models.KVBModelConfig):
         return kvb_models
     raise TypeError(f'Unknown policy config: {type(cfg).__name__}')
@@ -26,7 +31,9 @@ def _backend(cfg):
 def method_name(cfg):
     if _backend(cfg) is supervised_models:
         return 'icil'
-    return 'kvb_first_order' if cfg.first_order else 'kvb'
+    from .support_bc_models import SupportBCModelConfig
+    name = 'support_bc' if isinstance(cfg, SupportBCModelConfig) else 'kvb'
+    return name + '_first_order' if cfg.first_order else name
 
 
 def numerical_sources(cfg):
@@ -36,6 +43,8 @@ def numerical_sources(cfg):
     if method_name(cfg) != 'icil':
         sources.update({'kvb_models.py': root / 'kvb_models.py',
                         'fast_weight_ttt.py': root.parent / 'models' / 'fast_weight_ttt.py'})
+    if method_name(cfg).startswith('support_bc'):
+        sources['support_bc_models.py'] = root / 'support_bc_models.py'
     return sources
 
 

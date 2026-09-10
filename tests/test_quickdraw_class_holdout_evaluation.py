@@ -22,7 +22,7 @@ def _policy(dataset, method='icil', architecture='autoregressive'):
     cfg = dict(architecture=architecture, hidden_dim=8, num_heads=2,
         context_layers=1, decoder_layers=1, mlp_ratio=2, max_steps=dataset.max_steps,
         mixture_components=2, dropout=0., diffusion_steps=3, dtype='float32')
-    if method == 'kvb':
+    if method in ('kvb', 'support_bc'):
         cfg.update(fast_dim=4, fast_hidden_dim=6, inner_steps=3)
     model = policy_backend.model_config(cfg, method)
     params = policy_backend.init_model(jax.random.PRNGKey(42), model, support_count=2)
@@ -93,7 +93,8 @@ def test_training_plots_and_test_galleries_use_same_heldout_classes_different_dr
 
 
 @pytest.mark.parametrize('method,architecture', [
-    ('icil', 'autoregressive'), ('icil', 'diffusion'), ('kvb', 'autoregressive')])
+    ('icil', 'autoregressive'), ('icil', 'diffusion'), ('kvb', 'autoregressive'),
+    ('support_bc', 'autoregressive')])
 def test_checkpoint_figures_and_fid_default_to_heldout_categories(tmp_path, monkeypatch, method, architecture):
     dataset, resources, reference = _reference(tmp_path, monkeypatch)
     run, model, params = _policy(dataset, method, architecture)

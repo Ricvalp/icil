@@ -1,4 +1,4 @@
-"""Full-data Transformer training with ordinary ICIL or second-order KVB.
+"""Full-data Transformer training with ordinary ICIL or fast-weight adaptation.
 
 Every epoch visits all targets in the selected training classes. The NumPy loader
 supplies trajectories, never features. Only slow parameters are checkpointed.
@@ -38,6 +38,9 @@ from icil_jax_rlbench.train.checkpoints import load_checkpoint, save_checkpoint
 
 CHECKPOINT_TYPE = 'quickdraw_full_supervised_v1'
 KVB_CHECKPOINT_TYPE = 'quickdraw_full_kvb_v1'
+SUPPORT_BC_CHECKPOINT_TYPE = 'quickdraw_full_support_bc_v1'
+CHECKPOINT_TYPES = {'icil': CHECKPOINT_TYPE, 'kvb': KVB_CHECKPOINT_TYPE,
+                    'support_bc': SUPPORT_BC_CHECKPOINT_TYPE}
 # Reviewed predecessors preserve training when class holdout is disabled. Older
 # ICIL migrations and the explicit pre-holdout KVB migration are bounded below.
 PRE_PLOT_TRAINER_SHA256 = '2bff18d7e4a07fa2a819675509903a3ff6de0727a00f320deaf313fbf22255b8'
@@ -45,6 +48,8 @@ PRE_FID_TRAINER_SHA256 = '10ef761b5d78c4870c6c1f6a6501f16338eb54f3e58d0527416b28
 PRE_FID_BATCH_TRAINER_SHA256 = 'e850b79278f168747ba8dd664d80eb0e7cfe0e715ef9628838a22d6a3e32beac'
 PRE_KVB_TRAINER_SHA256 = 'd8f7024be470e29a0fcd18ccec570b6af75047f3d09e847a769115d0f9c7f448'
 PRE_CLASS_HOLDOUT_TRAINER_SHA256 = 'e02d52d84e0928dba41b4edf2c3a5366b180faa4f7aa9943f7b99a2809b1647c'
+PRE_SUPPORT_BC_TRAINER_SHA256 = '634540752a883dd6e6b6c31b6868bab2481083baea66305c12e25647e33f6c23'
+PRE_SUPPORT_BC_BACKEND_SHA256 = 'd5143c36a80381b853b118031ceeb8f959f341cc7031ffd9cb7109a14575b1f3'
 BATCH_FIELDS = frozenset(('support_tokens', 'support_mask', 'query_tokens',
                          'query_mask', 'query_point_mask', 'example_mask'))
 
@@ -58,10 +63,11 @@ class TrainState:
 
 
 def default_config(architecture='autoregressive', *, method='icil'):
+    output_name = architecture if method == 'icil' else f'{method}_transformer'
     return {
         'method': method,
         'dataset_root': 'datasets/quickdraw_full_nn_v1',
-        'output_dir': f'outputs/quickdraw_icil/{"kvb_transformer" if method == "kvb" else architecture}_v1',
+        'output_dir': f'outputs/quickdraw_icil/{output_name}_v1',
         'model': asdict(model_config({'architecture': architecture}, method)),
         'seed': 0, 'support_count': 4, 'selection_mode': 'exact_top_k',
         'condition_on_support': True,
@@ -280,8 +286,9 @@ def _wandb_run(cfg, output, history):
         raise ValueError('Resume W&B with the original project')
     resume = bool(saved and saved['mode'] == cfg['wandb_mode'] == 'online')
     job_type = 'supervised-icil'
-    if cfg['method'] == 'kvb':
-        job_type = 'kvb-first-order' if cfg['model']['first_order'] else 'kvb-full-second-order'
+    if cfg['method'] in ('kvb', 'support_bc'):
+        job_type = cfg['method'].replace('_', '-') + (
+            '-first-order' if cfg['model']['first_order'] else '-full-second-order')
     run = wandb.init(project=cfg['wandb_project'],
                      entity=cfg['wandb_entity'] or (saved.get('entity') if saved else None),
                      name=cfg['wandb_name'] or output.name,
@@ -351,6 +358,19 @@ def _compatible_execution(previous, current):
     if not isinstance(previous, dict):
         return False
     sources = previous.get('source_hashes', {})
+    # The new method adds dispatch only; the existing ICIL/KVB numerics are
+    # unchanged. Bound this migration to the reviewed backend AND runner hashes.
+    reviewed_trainers = (PRE_SUPPORT_BC_TRAINER_SHA256, PRE_CLASS_HOLDOUT_TRAINER_SHA256,
+                        PRE_KVB_TRAINER_SHA256, PRE_PLOT_TRAINER_SHA256,
+                        PRE_FID_TRAINER_SHA256, PRE_FID_BATCH_TRAINER_SHA256)
+    if (sources.get('supervised_train.py') in reviewed_trainers
+            and sources.get('policy_backend.py') == PRE_SUPPORT_BC_BACKEND_SHA256):
+        sources = {**sources, 'policy_backend.py': current['source_hashes']['policy_backend.py']}
+        previous = {**previous, 'source_hashes': sources}
+    if sources.get('supervised_train.py') == PRE_SUPPORT_BC_TRAINER_SHA256:
+        upgraded = {**previous, 'source_hashes': {
+            **sources, 'supervised_train.py': current['source_hashes']['supervised_train.py']}}
+        return upgraded == current
     # The reviewed pre-holdout runner has identical numerics when count=0. The
     # scientific-config comparison separately forbids adding a holdout on resume.
     if (sources.get('supervised_train.py') == PRE_CLASS_HOLDOUT_TRAINER_SHA256
@@ -375,10 +395,10 @@ def _compatible_execution(previous, current):
 def load_run(checkpoint, *, dataset_root=None):
     payload = load_checkpoint(checkpoint)
     checkpoint_type = payload.get('extra', {}).get('checkpoint_type')
-    if checkpoint_type not in (CHECKPOINT_TYPE, KVB_CHECKPOINT_TYPE):
-        raise ValueError('Expected a full-data ICIL or KVB Transformer checkpoint')
+    if checkpoint_type not in CHECKPOINT_TYPES.values():
+        raise ValueError('Expected a full-data ICIL, KVB, or support-BC Transformer checkpoint')
     cfg = resolve_config(payload['config'])
-    if checkpoint_type != (KVB_CHECKPOINT_TYPE if cfg['method'] == 'kvb' else CHECKPOINT_TYPE):
+    if checkpoint_type != CHECKPOINT_TYPES[cfg['method']]:
         raise ValueError('Checkpoint type and policy method differ')
     dataset = FullDataset.open(dataset_root or cfg['dataset_root'])
     if dataset.identifier != payload['extra']['dataset_id']:
@@ -419,7 +439,7 @@ def train(value):
     cfg = resolve_config(value)
     dataset = FullDataset.open(cfg['dataset_root'])
     model_cfg = model_config(cfg['model'], cfg['method'])
-    checkpoint_type = KVB_CHECKPOINT_TYPE if cfg['method'] == 'kvb' else CHECKPOINT_TYPE
+    checkpoint_type = CHECKPOINT_TYPES[cfg['method']]
     if dataset.max_steps != model_cfg.max_steps or cfg['support_count'] > dataset.top_m:
         raise ValueError('Model length/support count must agree with the full dataset')
     class_split = resolve_class_split(dataset, cfg)
@@ -496,7 +516,8 @@ def train(value):
         'checkpoint_type': checkpoint_type, 'dataset_id': dataset.identifier,
         'dataset_manifest': str(dataset.root / 'manifest.json'),
         'dataset_manifest_sha256': file_sha256(dataset.root / 'manifest.json'),
-        'training': ('query_nll_after_support_kvb_adaptation' if cfg['method'] == 'kvb'
+        'training': ('query_nll_after_support_bc_adaptation' if cfg['method'] == 'support_bc'
+                     else 'query_nll_after_support_kvb_adaptation' if cfg['method'] == 'kvb'
                      else 'ordinary_supervised_query_objective_no_inner_loop_or_fast_weights'),
         'method': method_name(model_cfg),
         'architecture': model_cfg.architecture, 'model': asdict(model_cfg),
@@ -511,12 +532,17 @@ def train(value):
         'validation_example_count': len(evaluation_rows),
         'test_used_for_selection': False, 'config': cfg,
     }
-    if cfg['method'] == 'kvb':
+    if cfg['method'] in ('kvb', 'support_bc'):
         provenance.update({
             'conditioning': ('support_only_through_adapted_fast_state_delta_read'
                              if cfg['condition_on_support'] else 'no_support_write_delta_read_zero'),
             'inner_steps_per_task': model_cfg.inner_steps,
             'write_batch': 'same_pooled_valid_support_tokens_including_stop_at_every_step',
+            'write_objective': ('support_action_bc' if cfg['method'] == 'support_bc'
+                                else 'key_value_reconstruction'),
+            'write_representation': ('shared_causal_query_decoder_cached_per_demo'
+                                     if cfg['method'] == 'support_bc'
+                                     else 'independent_bidirectional_support_encoder'),
             'outer_objective': 'query_likelihood_only',
             'meta_gradient': 'first_order_ablation' if model_cfg.first_order else 'full_second_order',
             'fast_parameter_count': sum(int(x.size) for x in
@@ -529,7 +555,7 @@ def train(value):
         _json(output / 'provenance.json', provenance)
     elif extra['execution'] != execution:
         _json(output / 'evaluation_upgrade.json', {
-            'change': 'evaluation_and_class_selection_upgrade_preserving_all_category_training',
+            'change': 'reviewed_dispatch_and_class_selection_upgrade_preserving_existing_training',
             'checkpoint_step': int(state.step), 'previous_execution': extra['execution'],
             'current_execution': execution,
         })
@@ -580,7 +606,7 @@ def train(value):
                    'train/learning_rate': float(schedule(max(step - 1, 0))),
                    'exposure/query_events': int(exposure['query_events']),
                    'exposure/support_events': int(exposure['support_events'])}
-            if cfg['method'] == 'kvb':
+            if cfg['method'] in ('kvb', 'support_bc'):
                 row['exposure/write_steps'] = (int(exposure['targets'].sum()) * model_cfg.inner_steps
                                                if cfg['condition_on_support'] else 0)
             record(row)

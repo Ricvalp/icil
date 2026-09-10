@@ -121,6 +121,13 @@ All three modes use the same seeded 310/35 class assignment and save to separate
 See the [class holdout guide](../icil_jax_rlbench/quickdraw/CLASS_HOLDOUT.md)
 for class names, count/seed overrides, resume, and held-out figures/FID.
 
+Six additional held-out-class experiments use support-BC WRITE or larger
+Transformers. Submission modes are `bc-heldout`, `bc1-heldout`, `bc5-heldout`,
+`bc-fast128-heldout`, `bc-large-heldout`, and `kvb-large-heldout`, each with its
+own 12-hour H200 batch file. See the
+[support-BC experiment guide](../icil_jax_rlbench/quickdraw/SUPPORT_BC_EXPERIMENTS.md)
+for the comparison table, exact commands, output directories, and resume.
+
 Each command submits a separate 12-hour, single-H200 job. Use only the command
 for the experiment you want to run. The ordinary AR/diffusion hyperparameters remain K=4, effective batch
 64, microbatch 16, 20 epochs, and four-example plot panels every 10,000 updates.
