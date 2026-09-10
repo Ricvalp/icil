@@ -324,11 +324,13 @@ def _nearest_descriptors(queries, candidates, *, chunk_size=32768):
 
 
 def generate_run(checkpoint, episodes, output, *, dataset_root=None, conditions=None,
-                 samples_per_task=4, batch_size=8, seed=0, allow_test=False, progress=True):
+                 samples_per_task=4, batch_size=8, seed=0, allow_test=False, progress=True,
+                 category_scope='auto'):
     """Generate each condition with identical per-task/sample random keys."""
     import jax
     import jax.numpy as jnp
-    from .supervised_models import generate, loss
+    from .policy_backend import generate, loss, method_name
+    from .class_split import evaluation_category_ids, filter_rows, resolve_class_split
     from .supervised_train import load_run
 
     conditions = tuple(conditions or CONDITIONS[:-1])
@@ -339,6 +341,13 @@ def generate_run(checkpoint, episodes, output, *, dataset_root=None, conditions=
     _status('Verifying checkpoint, full dataset, and frozen evaluation ...', progress)
     payload, cfg, model_cfg, dataset = load_run(checkpoint, dataset_root=dataset_root)
     arrays, evaluation = load_evaluation(episodes, dataset)
+    class_split = resolve_class_split(dataset, cfg)
+    categories = evaluation_category_ids(dataset, cfg, category_scope)
+    if not np.all(np.isin(dataset.category_ids[arrays['target_rows']], categories)):
+        raise ValueError('Frozen neighborhood-control manifest includes categories outside the checkpoint '
+                         'evaluation scope. Use a manifest containing only the selected categories, or '
+                         'explicit --category-scope all for all-category controls. The figure and FID '
+                         'commands automatically subset their existing all-category resources.')
     if evaluation['split'] == 'test' and not allow_test:
         raise ValueError('Test generation requires explicit --allow-test.')
     if evaluation['support_count'] != cfg['support_count']:
@@ -367,7 +376,8 @@ def generate_run(checkpoint, episodes, output, *, dataset_root=None, conditions=
     train_rows, train_descriptors, nearest_rows, nearest_distances = None, None, None, None
     if 'nearest_training_example' in conditions:
         _status('Finding nearest training examples using only shown support geometry ...', progress)
-        train_rows = np.sort(np.asarray(dataset.rows('train'), np.int64))
+        train_rows = np.sort(filter_rows(dataset, np.asarray(dataset.rows('train'), np.int64),
+                                         class_split['training_category_ids']))
         train_descriptors = _geometry_descriptors(dataset, train_rows)
         support_descriptors = _geometry_descriptors(dataset, arrays['support_rows'].ravel()).reshape(
             len(target_rows), evaluation['support_count'], -1).mean(1)
@@ -426,7 +436,7 @@ def generate_run(checkpoint, episodes, output, *, dataset_root=None, conditions=
                 if condition == 'nearest_training_example':
                     record.update(copied_training_id=str(dataset.base_ids[nearest_rows[task]]),
                                   nearest_training_support_geometry_distance=float(nearest_distances[task]),
-                                  nearest_training_selection='all training rows; mean shown-support raw 16-point XY and length/stroke descriptor')
+                                  nearest_training_selection='all permitted training rows; mean shown-support raw 16-point XY and length/stroke descriptor')
                 if not is_baseline:
                     record['conditional_target_loss'] = task_losses[task]
                 if shown:
@@ -452,6 +462,8 @@ def generate_run(checkpoint, episodes, output, *, dataset_root=None, conditions=
             'manifest_id': evaluation['identifier'], 'evaluation_id': evaluation['identifier'],
             'dataset_identifier': dataset.identifier, 'checkpoint_id': checkpoint_id,
             'model_type': model_cfg.architecture, 'experiment': 'a', 'a_protocol': 'a_nn',
+            'method': method_name(model_cfg),
+            'class_split': class_split, 'category_scope': category_scope,
             'protocol': 'empty_prefix_generation_from_context_only',
             'pairing': 'identical task/sample PRNG keys and intended target/reference identities across conditions'})
         summaries[condition] = trajectory_statistics(trajectories)
@@ -465,6 +477,7 @@ def generate_run(checkpoint, episodes, output, *, dataset_root=None, conditions=
                 'pairing': 'same held-out targets and PRNG keys; diffusion time/noise paired across support conditions'}
     _dump(output / 'summary.json', {'checkpoint_id': checkpoint_id, 'evaluation_id': evaluation['identifier'],
                                   'conditions': summaries, 'samples_per_task': samples_per_task,
+                                  'class_split': class_split, 'category_scope': category_scope,
                                   'seed': seed, 'test_opt_in': allow_test})
     return output
 
@@ -472,6 +485,7 @@ def generate_run(checkpoint, episodes, output, *, dataset_root=None, conditions=
 def geometry_copying(dataset_root, generated, output, *, query_batch_size=64, progress=True):
     """Exact descriptor proximity to all training rows and actual shown supports."""
     from .full_data import FullDataset
+    from .class_split import filter_rows, resolve_class_split
 
     if query_batch_size < 1:
         raise ValueError('Positive query batch size required.')
@@ -480,6 +494,11 @@ def geometry_copying(dataset_root, generated, output, *, query_batch_size=64, pr
     if metadata.get('dataset_identifier') != dataset.identifier:
         raise ValueError('Generated trajectories and geometry-copying dataset differ.')
     training_rows = np.sort(np.asarray(dataset.rows('train'), np.int64))
+    if metadata.get('class_split') is not None:
+        class_split = resolve_class_split(dataset, metadata['class_split'])
+        if class_split['identifier'] != metadata['class_split']['identifier']:
+            raise ValueError('Generated class split provenance differs from this dataset.')
+        training_rows = filter_rows(dataset, training_rows, class_split['training_category_ids'])
     _status(f'Building raw geometry descriptors for {len(training_rows):,} training examples ...', progress)
     descriptors = _geometry_descriptors(dataset, training_rows)
     by_id = {str(value): i for i, value in enumerate(dataset.base_ids)}
@@ -591,6 +610,8 @@ def score_run(generation, feature_root, reference, output, *, reference_repeat=(
         comparisons[name] = effect
     result = {'checkpoint_id': intended['checkpoint_id'], 'evaluation_id': intended['evaluation_id'],
               'dataset_identifier': intended['dataset_identifier'], 'architecture': intended['model_type'],
+              'method': intended.get('method', 'icil'),
+              'class_split': intended.get('class_split'), 'category_scope': intended.get('category_scope', 'all'),
               'feature_scores': scores, 'paired_controls': comparisons,
               'uncertainty': 'overlap-connected neighborhoods within one training run; not independent seed uncertainty',
               'raw_output_statistics': summary['conditions']}
@@ -621,6 +642,7 @@ def main():
     generation.add_argument('--episodes', required=True)
     generation.add_argument('--output', required=True)
     generation.add_argument('--dataset-root')
+    generation.add_argument('--category-scope', choices=('auto', 'heldout', 'seen', 'all'), default='auto')
     generation.add_argument('--conditions', nargs='+', choices=CONDITIONS)
     generation.add_argument('--samples-per-task', type=int, default=4)
     generation.add_argument('--batch-size', type=int, default=8)

@@ -224,6 +224,7 @@ def test_periodic_fid_is_optional_replayable_and_preserves_training(dataset, tmp
     def evaluate(params, model_cfg, data, real, output, **kwargs):
         assert real is reference and data.identifier == dataset.identifier
         assert kwargs['seed'] == 2030
+        assert kwargs['batch_size'] == 64
         assert kwargs['selection_mode'] == 'sample_top_m'
         assert model_cfg.architecture == architecture
         # This evaluator has its own random stream and synchronizes live params.
@@ -260,14 +261,17 @@ def test_periodic_fid_is_optional_replayable_and_preserves_training(dataset, tmp
         training.train({**cfg, 'max_steps': 6, 'resume_path': str(interrupted), 'fid_seed': 99})
 
 
-def test_fid_resume_migration_and_config_validation():
+@pytest.mark.parametrize('predecessor', [training.PRE_FID_TRAINER_SHA256,
+                                       training.PRE_FID_BATCH_TRAINER_SHA256])
+def test_fid_resume_migration_and_config_validation(predecessor):
     current = training._execution_signature()
     previous = {**current, 'source_hashes': {
-        **current['source_hashes'], 'supervised_train.py': training.PRE_FID_TRAINER_SHA256}}
+        **current['source_hashes'], 'supervised_train.py': predecessor}}
     assert training._compatible_execution(previous, current)
     old_cfg = {key: value for key, value in training.default_config().items() if not key.startswith('fid_')}
     assert training._scientific_config(training.resolve_config(old_cfg)) == training._scientific_config(old_cfg)
     assert training.default_config()['fid_every'] == 10000
+    assert training.default_config()['fid_batch_size'] == 64
     assert training.default_config()['fid_enabled'] is False
     for invalid in ({'fid_enabled': 'false'}, {'fid_every': 0}, {'fid_batch_size': 0},
                     {'fid_feature_batch_size': -1}, {'fid_seed': -1}, {'fid_seed': 2 ** 32},

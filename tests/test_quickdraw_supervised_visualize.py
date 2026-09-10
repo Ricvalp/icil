@@ -49,10 +49,13 @@ def test_checkpoint_figures_use_actual_contexts_and_save_all_samples(tmp_path, m
     monkeypatch.setattr(training, 'load_run', load_run)
     original_draw = figures._draw
     drawn = []
+    annotations = []
 
     def draw(ax, tokens, point_mask, **kwargs):
         drawn.append((np.asarray(tokens).copy(), kwargs.get('raw_actions') is not None))
-        return original_draw(ax, tokens, point_mask, **kwargs)
+        status = original_draw(ax, tokens, point_mask, **kwargs)
+        annotations.append([text.get_text() for text in ax.texts])
+        return status
 
     monkeypatch.setattr(figures, '_draw', draw)
     output = figures.visualize_checkpoint(checkpoint, tmp_path / 'figures',
@@ -72,6 +75,7 @@ def test_checkpoint_figures_use_actual_contexts_and_save_all_samples(tmp_path, m
     assert metadata['context_indices'] == [0, 1]
     assert metadata['gallery_indices'] == [0, 1, 2, 3]
     assert metadata['generated_count'] == len(metadata['records']) == 4
+    assert annotations == [[]] * 10  # Four contexts, two generated panels, and four gallery entries.
     with np.load(output / 'generated_samples.npz') as archive:
         assert archive['tokens'].shape == (4, dataset.max_steps, 4)
         assert archive['raw_actions'].shape == archive['tokens'].shape
@@ -97,7 +101,7 @@ def test_checkpoint_figures_use_actual_contexts_and_save_all_samples(tmp_path, m
         figures.visualize_checkpoint(checkpoint, tmp_path / 'test', split='test')
 
 
-def test_clean_panels_keep_pen_gaps_and_failure_labels():
+def test_clean_panels_keep_pen_gaps_and_failure_metadata_without_captions():
     from matplotlib.figure import Figure
 
     tokens = np.asarray([[-.8, -.8, 0, 0], [-.3, .1, 1, 0], [.3, -.1, 0, 0],
@@ -107,7 +111,7 @@ def test_clean_panels_keep_pen_gaps_and_failure_labels():
     figure = Figure()
     ax = figure.subplots()
     status = figures._draw(ax, tokens, points, stopped=True, event_mask=events)
-    assert status == [] and not ax.texts  # Successful gallery entries have no debug footer.
+    assert status == [] and not ax.texts
     segments = ax.collections[0].get_segments()
     assert len(segments) == 2
     np.testing.assert_array_equal(segments[0], tokens[:2, :2])
@@ -119,12 +123,13 @@ def test_clean_panels_keep_pen_gaps_and_failure_labels():
     status = figures._draw(second, tokens, points, stopped=False, event_mask=events,
                            raw_actions=tokens)
     assert set(status) == {'NO STOP', 'NONFINITE', 'OUTSIDE CANVAS: 1'}
-    assert 'NONFINITE' in second.texts[0].get_text()
+    assert not second.texts
     assert len(second.collections[0].get_segments()) == 1
+    np.testing.assert_array_equal(second.collections[0].get_segments()[0], tokens[2:4, :2])
     third = figure.add_subplot(133)
     status = figures._draw(third, tokens, np.zeros(5, bool), stopped=True, event_mask=events)
     assert 'EMPTY' in status
-    assert 'EMPTY' in third.texts[0].get_text()
+    assert not third.texts
     figure.clear()
 
 

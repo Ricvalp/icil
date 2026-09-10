@@ -94,8 +94,35 @@ Or submit the diffusion Transformer:
 bash hpc/submit_quickdraw_h200.sh diffusion
 ```
 
+For the full second-order KVB autoregressive Transformer, use:
+
+```bash
+bash hpc/submit_quickdraw_h200.sh kvb
+```
+
+This uses the same dataset and allocation, with three pooled support updates
+per task. Its float32 meta-training configuration uses microbatches of 4 and
+saves to `outputs/quickdraw_icil/kvb_transformer_v1`. See the
+[KVB Transformer guide](../icil_jax_rlbench/quickdraw/KVB_TRANSFORMER.md) for the
+objective, resume, figures, and optional periodic FID commands.
+
+To train with **35 classes held out of policy training**, and use those classes'
+development drawings for validation, submit a new run with one of:
+
+```bash
+bash hpc/submit_quickdraw_h200.sh ar-heldout
+bash hpc/submit_quickdraw_h200.sh diffusion-heldout
+bash hpc/submit_quickdraw_h200.sh kvb-heldout
+```
+
+These use dedicated ICIL/KVB batch files and the same 12-hour H200 allocation.
+All three modes use the same seeded 310/35 class assignment and save to separate
+`*_heldout35_v1` directories. They reuse the existing dataset and evaluator.
+See the [class holdout guide](../icil_jax_rlbench/quickdraw/CLASS_HOLDOUT.md)
+for class names, count/seed overrides, resume, and held-out figures/FID.
+
 Each command submits a separate 12-hour, single-H200 job. Use only the command
-for the experiment you want to run. Hyperparameters remain K=4, effective batch
+for the experiment you want to run. The ordinary AR/diffusion hyperparameters remain K=4, effective batch
 64, microbatch 16, 20 epochs, and four-example plot panels every 10,000 updates.
 The H200 does not automatically change the scientific configuration.
 

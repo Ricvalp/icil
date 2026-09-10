@@ -20,7 +20,11 @@ if (( $# )); then shift; fi
 case "$architecture" in
     ar|autoregressive) config=icil_jax_rlbench/configs/quickdraw_ar_transformer.py ;;
     diffusion) config=icil_jax_rlbench/configs/quickdraw_diffusion_transformer.py ;;
-    *) printf 'Use ar or diffusion, followed by optional trainer arguments.\n' >&2; exit 2 ;;
+    kvb) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer.py ;;
+    ar-heldout) config=icil_jax_rlbench/configs/quickdraw_ar_transformer_heldout.py ;;
+    diffusion-heldout) config=icil_jax_rlbench/configs/quickdraw_diffusion_transformer_heldout.py ;;
+    kvb-heldout) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_heldout.py ;;
+    *) printf 'Use ar, diffusion, kvb, ar-heldout, diffusion-heldout, or kvb-heldout, followed by optional trainer arguments.\n' >&2; exit 2 ;;
 esac
 
 dataset_root="${QUICKDRAW_DATASET_ROOT:-/hpc/home/phi/rvalperga/data/quickdraw_full_nn_v1}"

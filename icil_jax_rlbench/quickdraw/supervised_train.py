@@ -1,7 +1,7 @@
-"""Full-data supervised ICIL training for autoregressive and diffusion Transformers.
+"""Full-data Transformer training with ordinary ICIL or second-order KVB.
 
-Every epoch visits all training targets. There are no inner-loop updates or
-task-adapted parameters. The NumPy loader supplies trajectories, never features.
+Every epoch visits all targets in the selected training classes. The NumPy loader
+supplies trajectories, never features. Only slow parameters are checkpointed.
 """
 
 from __future__ import annotations
@@ -26,16 +26,25 @@ import numpy as np
 import optax
 
 from .full_data import FullDataset
-from .supervised_models import SupervisedModelConfig, init_model, loss
+from .class_split import (
+    DEFAULT_HOLDOUT_SEED, resolve_class_split, split_rows, validate_holdout_config,
+    validate_saved_class_split,
+)
+from .supervised_models import SupervisedModelConfig
+from .policy_backend import init_model, loss, method_name, model_config, numerical_sources
 from .metrics import file_sha256
 from icil_jax_rlbench.train.checkpoints import load_checkpoint, save_checkpoint
 
 
 CHECKPOINT_TYPE = 'quickdraw_full_supervised_v1'
-# This reviewed predecessor differs only in observational plotting/logging.
-# Remove this migration if numerical training or data sampling changes.
+KVB_CHECKPOINT_TYPE = 'quickdraw_full_kvb_v1'
+# Reviewed predecessors preserve training when class holdout is disabled. Older
+# ICIL migrations and the explicit pre-holdout KVB migration are bounded below.
 PRE_PLOT_TRAINER_SHA256 = '2bff18d7e4a07fa2a819675509903a3ff6de0727a00f320deaf313fbf22255b8'
 PRE_FID_TRAINER_SHA256 = '10ef761b5d78c4870c6c1f6a6501f16338eb54f3e58d0527416b2898312a5aae'
+PRE_FID_BATCH_TRAINER_SHA256 = 'e850b79278f168747ba8dd664d80eb0e7cfe0e715ef9628838a22d6a3e32beac'
+PRE_KVB_TRAINER_SHA256 = 'd8f7024be470e29a0fcd18ccec570b6af75047f3d09e847a769115d0f9c7f448'
+PRE_CLASS_HOLDOUT_TRAINER_SHA256 = 'e02d52d84e0928dba41b4edf2c3a5366b180faa4f7aa9943f7b99a2809b1647c'
 BATCH_FIELDS = frozenset(('support_tokens', 'support_mask', 'query_tokens',
                          'query_mask', 'query_point_mask', 'example_mask'))
 
@@ -48,13 +57,15 @@ class TrainState:
     rng: jax.Array
 
 
-def default_config(architecture='autoregressive'):
+def default_config(architecture='autoregressive', *, method='icil'):
     return {
+        'method': method,
         'dataset_root': 'datasets/quickdraw_full_nn_v1',
-        'output_dir': f'outputs/quickdraw_icil/{architecture}_v1',
-        'model': asdict(SupervisedModelConfig(architecture=architecture)),
+        'output_dir': f'outputs/quickdraw_icil/{"kvb_transformer" if method == "kvb" else architecture}_v1',
+        'model': asdict(model_config({'architecture': architecture}, method)),
         'seed': 0, 'support_count': 4, 'selection_mode': 'exact_top_k',
         'condition_on_support': True,
+        'heldout_category_count': 0, 'heldout_category_seed': DEFAULT_HOLDOUT_SEED,
         'epochs': 20, 'batch_size': 64, 'micro_batch_size': 16,
         'learning_rate': 3e-4, 'min_learning_rate': 3e-5,
         'weight_decay': .01, 'grad_clip_norm': 1.0,
@@ -65,7 +76,7 @@ def default_config(architecture='autoregressive'):
         'plot_every': 10000, 'plot_examples': 4, 'plot_seed': 2027,
         'fid_enabled': False, 'fid_every': 10000,
         'fid_reference_root': 'datasets/quickdraw_fid_development_v1',
-        'fid_seed': 2030, 'fid_batch_size': 8, 'fid_feature_batch_size': 64,
+        'fid_seed': 2030, 'fid_batch_size': 64, 'fid_feature_batch_size': 64,
         'fid_python': '.venv-quickdraw-metrics/bin/python',
         'fid_donor_root': '../quick-robot-draw',
         'fid_extractor_checkpoint': 'outputs/quickdraw_evaluator/resnet18_v1/resnet18_best.pt',
@@ -81,8 +92,9 @@ def resolve_config(value):
     unknown = set(value) - set(default_config())
     if unknown:
         raise ValueError(f'Unknown supervised training fields: {sorted(unknown)}')
-    cfg = {**default_config(), **dict(value)}
-    cfg['model'] = asdict(SupervisedModelConfig(**cfg['model']))
+    cfg = {**default_config(method=value.get('method', 'icil')), **dict(value)}
+    cfg['model'] = asdict(model_config(cfg['model'], cfg['method']))
+    validate_holdout_config(cfg)
     for name in ('epochs', 'batch_size', 'micro_batch_size', 'support_count',
                  'log_every', 'checkpoint_every', 'prefetch_batches',
                  'fid_every', 'fid_batch_size', 'fid_feature_batch_size'):
@@ -215,7 +227,7 @@ def _batches(dataset, rows, cfg, epoch=0, start=0, *, validation=False):
 
 
 def validation_rows(dataset, cfg):
-    rows = dataset.rows('development')
+    rows = split_rows(dataset, cfg, 'development')
     cap = cfg['validation_examples_per_category']
     if not cap:
         return rows
@@ -267,12 +279,15 @@ def _wandb_run(cfg, output, history):
     if saved and saved['project'] != cfg['wandb_project']:
         raise ValueError('Resume W&B with the original project')
     resume = bool(saved and saved['mode'] == cfg['wandb_mode'] == 'online')
+    job_type = 'supervised-icil'
+    if cfg['method'] == 'kvb':
+        job_type = 'kvb-first-order' if cfg['model']['first_order'] else 'kvb-full-second-order'
     run = wandb.init(project=cfg['wandb_project'],
                      entity=cfg['wandb_entity'] or (saved.get('entity') if saved else None),
                      name=cfg['wandb_name'] or output.name,
                      id=saved['id'] if resume else uuid.uuid4().hex,
                      resume='allow' if resume else 'never', mode=cfg['wandb_mode'],
-                     dir=str(output), job_type='supervised-icil',
+                     dir=str(output), job_type=job_type,
                      config={key: value for key, value in cfg.items() if key != 'resume_path'})
     exit_code = 1
     try:
@@ -310,18 +325,23 @@ def _scientific_config(cfg):
                'log_every', 'checkpoint_every', 'prefetch_batches',
                'plot_every', 'plot_examples', 'plot_seed',
                'wandb_project', 'wandb_name', 'wandb_entity', 'wandb_mode'}
+    cfg = {'method': 'icil', 'heldout_category_count': 0,
+           'heldout_category_seed': DEFAULT_HOLDOUT_SEED, **cfg}
     return {key: value for key, value in cfg.items()
             if key not in mutable and not key.startswith('fid_')}
 
 
-def _execution_signature():
+def _execution_signature(model_cfg=None):
+    if model_cfg is None:
+        model_cfg = SupervisedModelConfig()
+    sources = {**numerical_sources(model_cfg), 'supervised_train.py': Path(__file__),
+               'full_data.py': Path(__file__).with_name('full_data.py'),
+               'class_split.py': Path(__file__).with_name('class_split.py')}
     return {
         'versions': {name: version(name) for name in ('jax', 'jaxlib', 'flax', 'optax', 'numpy')},
         'backend': jax.default_backend(),
         'device_kinds': [device.device_kind for device in jax.local_devices()],
-        'source_hashes': {path.name: file_sha256(path) for path in
-                          (Path(__file__), Path(__file__).with_name('supervised_models.py'),
-                           Path(__file__).with_name('full_data.py'))},
+        'source_hashes': {name: file_sha256(path) for name, path in sources.items()},
     }
 
 
@@ -331,32 +351,53 @@ def _compatible_execution(previous, current):
     if not isinstance(previous, dict):
         return False
     sources = previous.get('source_hashes', {})
-    if sources.get('supervised_train.py') not in (PRE_PLOT_TRAINER_SHA256, PRE_FID_TRAINER_SHA256):
+    # The reviewed pre-holdout runner has identical numerics when count=0. The
+    # scientific-config comparison separately forbids adding a holdout on resume.
+    if (sources.get('supervised_train.py') == PRE_CLASS_HOLDOUT_TRAINER_SHA256
+            and 'class_split.py' not in sources):
+        upgraded = {**previous, 'source_hashes': {
+            **sources, 'class_split.py': current['source_hashes']['class_split.py'],
+            'supervised_train.py': current['source_hashes']['supervised_train.py']}}
+        return upgraded == current
+    if 'kvb_models.py' in sources or 'kvb_models.py' in current['source_hashes']:
+        return False
+    if sources.get('supervised_train.py') not in (
+            PRE_PLOT_TRAINER_SHA256, PRE_FID_TRAINER_SHA256, PRE_FID_BATCH_TRAINER_SHA256,
+            PRE_KVB_TRAINER_SHA256):
         return False
     upgraded = {**previous, 'source_hashes': {
+        'policy_backend.py': current['source_hashes']['policy_backend.py'],
+        'class_split.py': current['source_hashes']['class_split.py'],
         **sources, 'supervised_train.py': current['source_hashes']['supervised_train.py']}}
     return upgraded == current
 
 
 def load_run(checkpoint, *, dataset_root=None):
     payload = load_checkpoint(checkpoint)
-    if payload.get('extra', {}).get('checkpoint_type') != CHECKPOINT_TYPE:
-        raise ValueError('Expected a full-data supervised Transformer checkpoint')
+    checkpoint_type = payload.get('extra', {}).get('checkpoint_type')
+    if checkpoint_type not in (CHECKPOINT_TYPE, KVB_CHECKPOINT_TYPE):
+        raise ValueError('Expected a full-data ICIL or KVB Transformer checkpoint')
     cfg = resolve_config(payload['config'])
+    if checkpoint_type != (KVB_CHECKPOINT_TYPE if cfg['method'] == 'kvb' else CHECKPOINT_TYPE):
+        raise ValueError('Checkpoint type and policy method differ')
     dataset = FullDataset.open(dataset_root or cfg['dataset_root'])
     if dataset.identifier != payload['extra']['dataset_id']:
         raise ValueError('Checkpoint and dataset identities differ')
-    return payload, cfg, SupervisedModelConfig(**cfg['model']), dataset
+    validate_saved_class_split(payload['extra'].get('class_split'), dataset, cfg)
+    return payload, cfg, model_config(cfg['model'], cfg['method']), dataset
 
 
 def _prepare_training_fid(cfg, dataset, output):
     """Validate the optional evaluator before training; freeze the monitoring protocol."""
     if not cfg['fid_enabled']:
         return None
-    from .supervised_fid import load_reference, preflight
+    from .supervised_fid import load_reference, preflight, select_reference_categories
     reference = load_reference(cfg['fid_reference_root'], dataset)
     if reference.split != 'development':
         raise ValueError('Training FID requires development references; test is for final evaluation')
+    class_split = resolve_class_split(dataset, cfg)
+    if cfg['heldout_category_count']:
+        reference = select_reference_categories(reference, dataset, class_split['heldout_category_ids'])
     preflight(reference, python=cfg['fid_python'], donor_root=cfg['fid_donor_root'],
               extractor_checkpoint=cfg['fid_extractor_checkpoint'],
               checkpoint_provenance=cfg['fid_checkpoint_provenance'] or None)
@@ -366,6 +407,8 @@ def _prepare_training_fid(cfg, dataset, output):
         'selection_mode': cfg['selection_mode'],
         'condition_on_support': cfg['condition_on_support'],
     }
+    if cfg['heldout_category_count']:
+        selection['class_split_id'] = class_split['identifier']
     path = output / 'fid' / 'selection.json'
     if path.exists() and json.loads(path.read_text()) != selection:
         raise ValueError('Keep the FID reference and seed fixed within a training run')
@@ -375,10 +418,15 @@ def _prepare_training_fid(cfg, dataset, output):
 def train(value):
     cfg = resolve_config(value)
     dataset = FullDataset.open(cfg['dataset_root'])
-    model_cfg = SupervisedModelConfig(**cfg['model'])
+    model_cfg = model_config(cfg['model'], cfg['method'])
+    checkpoint_type = KVB_CHECKPOINT_TYPE if cfg['method'] == 'kvb' else CHECKPOINT_TYPE
     if dataset.max_steps != model_cfg.max_steps or cfg['support_count'] > dataset.top_m:
         raise ValueError('Model length/support count must agree with the full dataset')
-    train_rows = dataset.rows('train')
+    class_split = resolve_class_split(dataset, cfg)
+    train_rows = split_rows(dataset, cfg, 'train')
+    evaluation_rows = validation_rows(dataset, cfg)
+    if not len(train_rows) or not len(evaluation_rows):
+        raise ValueError('Class selection must retain both training and validation drawings')
     steps_per_epoch = math.ceil(len(train_rows) / cfg['batch_size'])
     output = Path(cfg['output_dir']).resolve()
     fid_context = _prepare_training_fid(cfg, dataset, output)
@@ -387,16 +435,17 @@ def train(value):
     if fid_context is not None and saved_fid_protocol is not None and fid_context[1] != saved_fid_protocol:
         raise ValueError('Keep the FID reference and seed fixed within a training run')
     fid_protocol = fid_context[1] if fid_context is not None else saved_fid_protocol
-    execution = _execution_signature()
+    execution = _execution_signature(model_cfg)
     if cfg['schedule_steps'] is None:
         cfg['schedule_steps'] = (payload['config']['schedule_steps'] if payload
                                  else max(cfg['epochs'] * steps_per_epoch, cfg['warmup_steps'] + 1))
     if payload:
         extra = payload['extra']
-        if extra.get('checkpoint_type') != CHECKPOINT_TYPE or extra['dataset_id'] != dataset.identifier:
+        if extra.get('checkpoint_type') != checkpoint_type or extra['dataset_id'] != dataset.identifier:
             raise ValueError('Resume requires the same supervised dataset and checkpoint type')
         if _scientific_config(cfg) != _scientific_config(payload['config']):
             raise ValueError('Resume requires identical model, data sampling, optimizer, and validation settings')
+        validate_saved_class_split(extra.get('class_split'), dataset, cfg)
         if Path(cfg['resume_path']).resolve().parent != output:
             raise ValueError('Resume in the original output directory to retain the historical best checkpoint')
         if not _compatible_execution(extra.get('execution'), execution):
@@ -405,7 +454,8 @@ def train(value):
         if cfg['plot_every'] and selection_path.exists():
             selection = json.loads(selection_path.read_text())
             if (selection['seed'] != cfg['plot_seed'] or
-                    len(selection['target_rows']) != min(cfg['plot_examples'], len(dataset.rows('development')))):
+                    len(selection['target_rows']) != min(cfg['plot_examples'],
+                                                        len(split_rows(dataset, cfg, 'development')))):
                 raise ValueError('Keep plot_examples and plot_seed fixed after the first plot')
         params = jax.device_put(payload['params'])
     else:
@@ -432,31 +482,54 @@ def train(value):
     if epoch >= cfg['epochs'] or (cfg['max_steps'] and int(state.step) >= cfg['max_steps']):
         raise ValueError('The requested training budget is already complete')
     output.mkdir(parents=True, exist_ok=True)
+    class_path = output / 'class_split.json'
+    if class_path.exists() and json.loads(class_path.read_text()) != class_split:
+        raise ValueError('Keep the saved class split fixed within a training run')
+    if not class_path.exists():
+        _json(class_path, class_split)
     if fid_context is not None:
         selection_path = output / 'fid' / 'selection.json'
         selection_path.parent.mkdir(parents=True, exist_ok=True)
         if not selection_path.exists():
             _json(selection_path, fid_context[1])
     provenance = {
-        'checkpoint_type': CHECKPOINT_TYPE, 'dataset_id': dataset.identifier,
+        'checkpoint_type': checkpoint_type, 'dataset_id': dataset.identifier,
         'dataset_manifest': str(dataset.root / 'manifest.json'),
         'dataset_manifest_sha256': file_sha256(dataset.root / 'manifest.json'),
-        'training': 'ordinary_supervised_query_objective_no_inner_loop_or_fast_weights',
+        'training': ('query_nll_after_support_kvb_adaptation' if cfg['method'] == 'kvb'
+                     else 'ordinary_supervised_query_objective_no_inner_loop_or_fast_weights'),
+        'method': method_name(model_cfg),
         'architecture': model_cfg.architecture, 'model': asdict(model_cfg),
         'conditioning': 'support_trajectories_only' if cfg['condition_on_support'] else 'independently_trained_no_context',
         'parameter_count': sum(int(x.size) for x in jax.tree_util.tree_leaves(params)),
         'execution': execution,
         'devices': [str(device) for device in jax.local_devices()],
         'training_target_count': len(train_rows), 'category_count': len(dataset.categories),
-        'validation_example_count': len(validation_rows(dataset, cfg)),
+        'training_category_count': len(class_split['training_category_ids']),
+        'validation_category_count': len(class_split['evaluation_category_ids']),
+        'class_split': class_split,
+        'validation_example_count': len(evaluation_rows),
         'test_used_for_selection': False, 'config': cfg,
     }
+    if cfg['method'] == 'kvb':
+        provenance.update({
+            'conditioning': ('support_only_through_adapted_fast_state_delta_read'
+                             if cfg['condition_on_support'] else 'no_support_write_delta_read_zero'),
+            'inner_steps_per_task': model_cfg.inner_steps,
+            'write_batch': 'same_pooled_valid_support_tokens_including_stop_at_every_step',
+            'outer_objective': 'query_likelihood_only',
+            'meta_gradient': 'first_order_ablation' if model_cfg.first_order else 'full_second_order',
+            'fast_parameter_count': sum(int(x.size) for x in
+                                        jax.tree_util.tree_leaves(params['adapter']['fast_init'])),
+            'fast_state_reset': 'learned_W0_at_every_task',
+            'generation_fast_state': 'adapt_once_then_freeze',
+        })
     _json(output / 'config.json', cfg)
     if not payload:
         _json(output / 'provenance.json', provenance)
     elif extra['execution'] != execution:
         _json(output / 'evaluation_upgrade.json', {
-            'change': 'periodic_development_plots_and_optional_fid_with_independent_rng',
+            'change': 'evaluation_and_class_selection_upgrade_preserving_all_category_training',
             'checkpoint_step': int(state.step), 'previous_execution': extra['execution'],
             'current_execution': execution,
         })
@@ -468,9 +541,13 @@ def train(value):
     started, window_started = time.monotonic(), time.monotonic()
     previous_validation_step = -1
     plot_batch = None
-    print(f'{model_cfg.architecture}: {len(train_rows):,} training targets across '
-          f'{len(dataset.categories)} categories; {steps_per_epoch:,} updates/epoch; '
+    print(f'{method_name(model_cfg)} {model_cfg.architecture}: {len(train_rows):,} training targets across '
+          f'{len(class_split["training_category_ids"])} categories; {steps_per_epoch:,} updates/epoch; '
           f'{provenance["parameter_count"]:,} parameters', flush=True)
+    if cfg['heldout_category_count']:
+        print(f'Class holdout: {cfg["heldout_category_count"]} categories (seed '
+              f'{cfg["heldout_category_seed"]}); {len(evaluation_rows):,} development drawings '
+              f'for validation. Selection saved to {class_path}', flush=True)
 
     with _wandb_run(cfg, output, history) as wandb_run:
         def record(row):
@@ -503,6 +580,9 @@ def train(value):
                    'train/learning_rate': float(schedule(max(step - 1, 0))),
                    'exposure/query_events': int(exposure['query_events']),
                    'exposure/support_events': int(exposure['support_events'])}
+            if cfg['method'] == 'kvb':
+                row['exposure/write_steps'] = (int(exposure['targets'].sum()) * model_cfg.inner_steps
+                                               if cfg['condition_on_support'] else 0)
             record(row)
             print(f"step {step:,} | epoch {row['epoch']:.3f} | train loss={row['train/loss']:.5f} | "
                   f"{row['train/examples_per_second']:.1f} examples/s", flush=True)
@@ -511,8 +591,9 @@ def train(value):
 
         def checkpoint(name):
             save_checkpoint(output / name, state=state, step=step, config=cfg, replicated=False,
-                extra={'checkpoint_type': CHECKPOINT_TYPE, 'dataset_id': dataset.identifier,
+                extra={'checkpoint_type': checkpoint_type, 'dataset_id': dataset.identifier,
                        'execution': execution,
+                       'class_split': class_split,
                        'fid_protocol': fid_protocol,
                        'next_epoch': epoch, 'next_batch': offset, 'history': history,
                        'best_validation_loss': best_loss, 'exposure': exposure,
@@ -522,7 +603,7 @@ def train(value):
             nonlocal best_loss, previous_validation_step, window_started
             if previous_validation_step == step:
                 return
-            values, count = validate(state.params, dataset, cfg, model_cfg)
+            values, count = validate(state.params, dataset, cfg, model_cfg, rows=evaluation_rows)
             record({'optimizer_step': step, 'epoch': epoch + offset / steps_per_epoch,
                     **{'validation/' + name: value for name, value in values.items()},
                     'validation/sample_count': count})
@@ -542,7 +623,9 @@ def train(value):
                 plot_batch = prepare_plot_batch(
                     dataset, count=cfg['plot_examples'], support_count=cfg['support_count'],
                     selection_mode=cfg['selection_mode'], seed=cfg['plot_seed'],
-                    condition_on_support=cfg['condition_on_support'])
+                    condition_on_support=cfg['condition_on_support'],
+                    **({'category_ids': class_split['heldout_category_ids']}
+                       if cfg['heldout_category_count'] else {}))
                 selection_path = output / 'plots' / 'selection.json'
                 selection_path.parent.mkdir(parents=True, exist_ok=True)
                 if selection_path.exists():
@@ -573,7 +656,8 @@ def train(value):
                 extractor_checkpoint=cfg['fid_extractor_checkpoint'],
                 checkpoint_provenance=cfg['fid_checkpoint_provenance'] or None,
                 feature_batch_size=cfg['fid_feature_batch_size'],
-                keep_artifacts=cfg['fid_keep_artifacts'], optimizer_step=step)
+                keep_artifacts=cfg['fid_keep_artifacts'], optimizer_step=step,
+                **({'class_split': class_split} if cfg['heldout_category_count'] else {}))
             row = {'optimizer_step': step, 'epoch': epoch + offset / steps_per_epoch,
                    'validation/sketch_fid': result['sketch_fid'],
                    'validation/fid_generated_count': result['generated_count'],
@@ -633,6 +717,9 @@ def train(value):
         checkpoint('last.pkl')
     _json(output / 'exposure.json', {
         'dataset_id': dataset.identifier, 'optimizer_steps': step,
+        'class_split_id': class_split['identifier'],
+        'training_category_count': len(class_split['training_category_ids']),
+        'heldout_category_count': cfg['heldout_category_count'],
         'completed_epochs': epoch, 'next_batch': offset,
         'target_uses': int(np.sum(exposure['targets'], dtype=np.uint64)),
         'support_uses': int(np.sum(exposure['supports'], dtype=np.uint64)),

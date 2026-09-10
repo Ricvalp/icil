@@ -143,6 +143,8 @@ square of generated sketches**. The gallery visits distinct categories before
 repeating one; its first ten drawings also appear in the context panels. PDF
 strokes are vector paths; PNGs are 300 dpi. Use `--formats png pdf svg` for SVG,
 or `--no-category-labels` for an unlabeled gallery.
+The gallery and context panels omit diagnostic captions. Diagnostics such as
+points outside the normalized `[-1,1]` drawing range remain in `samples.json`.
 
 `samples.json` records checkpoint/dataset hashes, selected IDs, actual contexts,
 seeds and failures. `generated_samples.npz` stores the plotted sequences. Figures
@@ -174,7 +176,7 @@ The direct equivalent inside a GPU allocation is:
 The result is printed and saved in `summary.json`, with sample provenance in
 `generation.json`. Full generated rasters, tokens and features are temporary by
 default; add `--keep-artifacts` to retain them. Generation defaults to batch size
-8, and frozen CPU feature extraction to 64; tune with `--batch-size` and
+64, and frozen CPU feature extraction to 64; tune with `--batch-size` and
 `--feature-batch-size`. No trained-checkpoint score has been measured merely by
 preparing the reference bundle.
 
@@ -206,6 +208,8 @@ real sample counts, metric duration, and generation failure statistics. Local
 `fid/step_000010000/`; full artifacts remain optional with
 `--set fid_keep_artifacts=true`. Existing four-example image logging remains
 independent under `samples/context_and_generated`.
+Periodic FID also generates batches of 64; override this with
+`--set fid_batch_size=128` when using a different batch size.
 
 Metric RNG is independent of training RNG; the query/reference sets, neighbor
 choices and generation seeds remain fixed across evaluations. Once enabled,

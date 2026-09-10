@@ -16,13 +16,17 @@ from .metrics import file_sha256
 from .supervised_plots import _draw_sketch
 
 
-def select_gallery_targets(dataset, *, count: int, split: str, seed: int) -> np.ndarray:
+def select_gallery_targets(dataset, *, count: int, split: str, seed: int,
+                           category_ids=None) -> np.ndarray:
     """Round robin across shuffled categories, without selecting on model outputs."""
     if split not in ('development', 'test'):
         raise ValueError('Figures require the development or test split.')
     if count < 1 or not 0 <= seed < 2 ** 32:
         raise ValueError('A positive count and unsigned 32-bit seed are required.')
     available = np.asarray(dataset.rows(split), dtype=np.int32)
+    if category_ids is not None:
+        from .class_split import filter_rows
+        available = filter_rows(dataset, available, category_ids)
     if count > len(available):
         raise ValueError(f'Requested {count} examples but {split} has only {len(available)}.')
     rng = np.random.default_rng(np.random.SeedSequence([seed, 0x46494753]))
@@ -41,18 +45,13 @@ def select_gallery_targets(dataset, *, count: int, split: str, seed: int) -> np.
 
 
 def _draw(ax, tokens, point_mask, *, stopped, event_mask, raw_actions=None):
-    """Reuse the training renderer's pen semantics, omitting successful footers."""
+    """Reuse the training renderer's pen semantics, keeping diagnostics in metadata."""
     status = _draw_sketch(ax, tokens, point_mask, stopped=stopped,
                           event_mask=event_mask, raw_actions=raw_actions)
     for artist in list(ax.texts):
         artist.remove()
     for spine in ax.spines.values():
         spine.set_visible(False)
-    if status:
-        # Failed samples stay in their selected slots, including empty outputs.
-        ax.text(.5, .015, '\n'.join(status), transform=ax.transAxes,
-                ha='center', va='bottom', fontsize=5, color='#b42318',
-                bbox={'facecolor': 'white', 'edgecolor': 'none', 'alpha': .8, 'pad': 1})
     return status
 
 
@@ -139,10 +138,13 @@ def render_gallery(arrays, records, output, *, rows: int, columns: int,
 def visualize_checkpoint(checkpoint, output, *, dataset_root=None, split='development',
                          context_examples=10, grid_rows=10, grid_columns=10,
                          seed=2027, batch_size=8, formats=('png', 'pdf'), dpi=300,
-                         category_labels=True, allow_test=False, progress=True):
+                         category_labels=True, allow_test=False, progress=True,
+                         category_scope='auto'):
     """Generate once; the first context examples also appear in the unfiltered grid."""
     import jax
 
+    from .policy_backend import method_name, numerical_sources
+    from .class_split import evaluation_category_ids, resolve_class_split
     from .supervised_fid import generate_samples
     from .supervised_train import load_run
 
@@ -160,8 +162,11 @@ def visualize_checkpoint(checkpoint, output, *, dataset_root=None, split='develo
     if progress:
         print('Verifying checkpoint and dataset for sample figures ...', flush=True)
     payload, cfg, model_cfg, dataset = load_run(checkpoint, dataset_root=dataset_root)
+    class_split = resolve_class_split(dataset, cfg)
+    category_ids = evaluation_category_ids(dataset, cfg, category_scope)
     count = max(context_examples, grid_rows * grid_columns)
-    targets = select_gallery_targets(dataset, count=count, split=split, seed=seed)
+    targets = select_gallery_targets(dataset, count=count, split=split, seed=seed,
+                                     category_ids=category_ids)
     params = jax.device_put(payload['params'])
     condition_on_support = cfg.get('condition_on_support', True)
     arrays, records = generate_samples(params, model_cfg, dataset, targets,
@@ -171,7 +176,8 @@ def visualize_checkpoint(checkpoint, output, *, dataset_root=None, split='develo
     context_files, context_status = render_contexts(dataset, arrays, records, output,
         count=context_examples, condition_on_support=condition_on_support, formats=formats, dpi=dpi)
     gallery_files, gallery_status = render_gallery(arrays, records, output,
-        rows=grid_rows, columns=grid_columns, formats=formats, dpi=dpi, category_labels=category_labels)
+        rows=grid_rows, columns=grid_columns, formats=formats, dpi=dpi,
+        category_labels=category_labels)
     statuses = {**context_status, **gallery_status}
     for index, record in enumerate(records):
         record['generation_status'] = statuses[index]
@@ -181,6 +187,9 @@ def visualize_checkpoint(checkpoint, output, *, dataset_root=None, split='develo
         'schema_version': 1, 'checkpoint_path': str(Path(checkpoint).resolve()),
         'checkpoint_sha256': file_sha256(checkpoint), 'optimizer_step': int(payload['step']),
         'architecture': model_cfg.architecture, 'dataset_id': dataset.identifier,
+        'method': method_name(model_cfg),
+        'class_split': class_split, 'category_scope': category_scope,
+        'evaluation_category_ids': category_ids,
         'model_config': asdict(model_cfg), 'generation_batch_size': batch_size,
         'execution': {
             'versions': {name: version(name) for name in ('jax', 'jaxlib', 'flax', 'numpy', 'matplotlib')},
@@ -188,7 +197,7 @@ def visualize_checkpoint(checkpoint, output, *, dataset_root=None, split='develo
             'device_kinds': [device.device_kind for device in jax.local_devices()],
             'source_hashes': {name: file_sha256(Path(__file__).with_name(name)) for name in
                               ('supervised_visualize.py', 'supervised_plots.py', 'supervised_fid.py',
-                               'supervised_models.py', 'full_data.py')},
+                               'class_split.py', 'full_data.py')},
         },
         'dataset_root': str(dataset.root.resolve()), 'split': split, 'seed': int(seed),
         'support_count': cfg['support_count'], 'selection_mode': cfg['selection_mode'],
@@ -199,12 +208,14 @@ def visualize_checkpoint(checkpoint, output, *, dataset_root=None, split='develo
         'generation_protocol': 'Retrieval-centroid query is excluded from its K nearest-neighbor contexts and model input.',
         'coordinate_mode': 'absolute', 'pen_semantics': 'incoming',
         'canvas': [-1.04, 1.04, -1.04, 1.04],
-        'failure_policy': 'All outputs retained; empty, missing STOP, nonfinite, or out-of-canvas outputs labeled.',
+        'failure_policy': 'All outputs retained; diagnostics saved only in records.',
         'context_indices': list(range(context_examples)),
         'gallery_indices': list(range(grid_rows * grid_columns)),
         'records': records,
         'files': {path.name: file_sha256(path) for path in [*context_files, *gallery_files, sample_path]},
     }
+    metadata['execution']['source_hashes'].update({
+        name: file_sha256(path) for name, path in numerical_sources(model_cfg).items()})
     (output / 'samples.json').write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n')
     if progress:
         print(f'Saved {count} generated samples, context panels, and gallery to {output}', flush=True)
@@ -217,6 +228,7 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--dataset-root')
     parser.add_argument('--split', choices=('development', 'test'), default='development')
+    parser.add_argument('--category-scope', choices=('auto', 'heldout', 'seen', 'all'), default='auto')
     parser.add_argument('--allow-test', action='store_true')
     parser.add_argument('--context-examples', type=int, default=10)
     parser.add_argument('--grid-rows', type=int, default=10)

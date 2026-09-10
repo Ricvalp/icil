@@ -5,9 +5,11 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$repo_root"
 mode="${1:-ar}"
 case "$mode" in
-    ar|autoregressive|diffusion) batch_script=hpc/quickdraw_h200.sbatch ;;
+    ar|autoregressive|diffusion|kvb) batch_script=hpc/quickdraw_h200.sbatch ;;
+    ar-heldout|diffusion-heldout) batch_script=hpc/quickdraw_icil_heldout_h200.sbatch ;;
+    kvb-heldout) batch_script=hpc/quickdraw_kvb_heldout_h200.sbatch ;;
     visualize|fid) batch_script=hpc/quickdraw_evaluate_h200.sbatch ;;
-    *) printf 'Usage: bash hpc/submit_quickdraw_h200.sh [ar|diffusion|visualize|fid] [arguments]\n' >&2; exit 2 ;;
+    *) printf 'Usage: bash hpc/submit_quickdraw_h200.sh [ar|diffusion|kvb|ar-heldout|diffusion-heldout|kvb-heldout|visualize|fid] [arguments]\n' >&2; exit 2 ;;
 esac
 
 gpu_arguments_text="$(sinfo --noheader --partition=gpuq --format='%G|%f' | python3 -c '

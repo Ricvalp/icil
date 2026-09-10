@@ -140,9 +140,14 @@ def test_real_generation_keys_and_neighbor_selection_survive_batch_size(tmp_path
     targets = fid.select_centroids(dataset, samples_per_category=2)
     kwargs = dict(support_count=2, selection_mode='sample_top_m', seed=12, progress=False)
     first, first_records = fid.generate_samples(params, cfg, dataset, targets, batch_size=2, **kwargs)
-    second, second_records = fid.generate_samples(params, cfg, dataset, targets, batch_size=3, **kwargs)
+    # Exercise the larger default batch and padding against smaller batches.
+    second, second_records = fid.generate_samples(params, cfg, dataset, targets, **kwargs)
     for name in first:
-        np.testing.assert_array_equal(first[name], second[name])
+        # Batch shapes can change float32 kernel rounding without changing RNG.
+        if first[name].dtype.kind == 'f':
+            np.testing.assert_allclose(first[name], second[name], atol=1e-6, rtol=1e-6)
+        else:
+            np.testing.assert_array_equal(first[name], second[name])
     assert first_records == second_records
     for row, record in zip(targets, first_records):
         expected_rng = np.random.default_rng(np.random.SeedSequence([12, 0x53555050, int(row)]))

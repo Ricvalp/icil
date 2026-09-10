@@ -11,12 +11,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .supervised_models import SupervisedModelConfig, generate
+from .policy_backend import generate, method_name
+from .supervised_models import SupervisedModelConfig
 
 
 def prepare_plot_batch(dataset, *, count: int, support_count: int,
                        selection_mode: str, seed: int,
-                       condition_on_support: bool = True) -> dict:
+                       condition_on_support: bool = True, category_ids=None) -> dict:
     """Choose fixed development contexts without loading demonstrated query actions.
 
     Category IDs and drawing IDs are selection/provenance metadata only. Neither
@@ -32,6 +33,9 @@ def prepare_plot_batch(dataset, *, count: int, support_count: int,
     if not 0 <= seed < 2 ** 32:
         raise ValueError('Plot seed must fit an unsigned 32-bit integer.')
     development_rows = np.asarray(dataset.rows('development'))
+    if category_ids is not None:
+        from .class_split import filter_rows
+        development_rows = filter_rows(dataset, development_rows, category_ids)
     if not len(development_rows):
         raise ValueError('Training plots require development examples.')
     rng = np.random.default_rng(np.random.SeedSequence([seed, 8321]))
@@ -69,6 +73,8 @@ def prepare_plot_batch(dataset, *, count: int, support_count: int,
         'support_ids': np.asarray(dataset.base_ids[support_rows]).tolist(),
         'category_names': [dataset.categories[int(dataset.category_ids[row])] for row in targets],
     }
+    if category_ids is not None:
+        metadata['evaluation_category_ids'] = sorted(set(int(value) for value in category_ids))
     return {'support_tokens': tokens, 'support_mask': mask, 'metadata': metadata}
 
 
@@ -157,7 +163,9 @@ def generate_plot(params, model_cfg: SupervisedModelConfig, plot_batch: dict,
     axes = figure.subplots(rows, columns, squeeze=False)
     figure.subplots_adjust(left=.035, right=.985, bottom=.045, top=1 - .75 / height,
                            wspace=.18, hspace=.65)
-    figure.suptitle(f'{model_cfg.architecture} | step {step:,}\nFixed validation contexts and sampling seeds',
+    method = method_name(model_cfg)
+    title = model_cfg.architecture if method == 'icil' else f'{method} {model_cfg.architecture}'
+    figure.suptitle(f'{title} | step {step:,}\nFixed validation contexts and sampling seeds',
                    fontsize=9, y=1 - .1 / height)
     for index, output in enumerate(generated):
         example_axes = axes[index * rows_per_example:(index + 1) * rows_per_example].ravel()

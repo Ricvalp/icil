@@ -254,6 +254,61 @@ def load_reference(root, dataset, *, allow_test=False):
     return Reference(root, metadata, targets, references, features, feature_metadata)
 
 
+def select_reference_categories(reference, dataset, category_ids):
+    """Select matching centroid/real-feature populations without rendering again.
+
+    The parent artifact stays immutable. A subset has its own identity and
+    aligned feature records; full-category selection keeps the original identity.
+    """
+    ids = np.asarray(category_ids)
+    if (ids.ndim != 1 or not len(ids) or ids.dtype.kind not in 'iu'
+            or np.any(ids < 0) or np.any(ids >= len(dataset.categories))
+            or len(np.unique(ids)) != len(ids)):
+        raise ValueError('FID category IDs must be distinct, nonempty, valid integers.')
+    ids = np.sort(ids).astype(np.int32)
+    if reference.metadata['dataset_identifier'] != dataset.identifier:
+        raise ValueError('FID reference and full dataset identities differ.')
+    available = np.asarray(reference.metadata.get('category_ids',
+        np.arange(len(dataset.categories))), dtype=np.int32)
+    if not np.all(np.isin(ids, available)):
+        raise ValueError('Requested categories are absent from the FID reference population.')
+    if np.array_equal(ids, np.sort(available)):
+        return reference
+    target_mask = np.isin(dataset.category_ids[reference.target_rows], ids)
+    real_mask = np.isin(dataset.category_ids[reference.reference_rows], ids)
+    targets, real_rows = reference.target_rows[target_mask], reference.reference_rows[real_mask]
+    expected = len(ids) * reference.samples_per_category
+    for rows in (targets, real_rows):
+        counts = np.bincount(dataset.category_ids[rows], minlength=len(dataset.categories))
+        if len(rows) != expected or not np.all(counts[ids] == reference.samples_per_category):
+            raise ValueError('Selected FID population is not balanced over the requested categories.')
+    selection = {
+        'parent_reference_id': reference.identifier, 'dataset_identifier': dataset.identifier,
+        'split': reference.split, 'samples_per_category': reference.samples_per_category,
+        'category_ids': ids.tolist(), 'categories': [dataset.categories[int(i)] for i in ids],
+        'target_rows': targets.tolist(), 'reference_rows': real_rows.tolist(),
+    }
+    selection_id = _identifier(selection)
+    metadata = {key: value for key, value in reference.metadata.items()
+                if key not in ('identifier', 'selection_id', 'files')}
+    metadata.update({key: value for key, value in selection.items()
+                     if key not in ('target_rows', 'reference_rows')})
+    metadata.update(selection_id=selection_id,
+        parent_selection_id=reference.metadata['selection_id'],
+        parent_files=reference.metadata.get('files', reference.metadata.get('parent_files', {})),
+        category_selection='in_memory_subset_of_frozen_centroids_and_reserved_real_features')
+    metadata['identifier'] = _identifier(metadata)
+    feature_metadata = {key: value for key, value in reference.feature_metadata.items()
+                        if key != 'statistics'}
+    feature_metadata.update(
+        records=[record for record, selected in zip(reference.feature_metadata['records'], real_mask) if selected],
+        actual_count=expected, expected_count=expected, manifest_id=selection_id,
+        evaluation_id=selection_id, parent_reference_id=reference.identifier,
+        category_ids=ids.tolist(), category_selection=metadata['category_selection'])
+    return Reference(reference.root, metadata, targets, real_rows,
+                     reference.features[real_mask], feature_metadata)
+
+
 def preflight(reference, *, python, donor_root, extractor_checkpoint, checkpoint_provenance=None):
     """Fail before training/generation if reference and current evaluator differ."""
     current = _resources(python, donor_root, extractor_checkpoint, checkpoint_provenance)
@@ -264,7 +319,7 @@ def preflight(reference, *, python, donor_root, extractor_checkpoint, checkpoint
 @lru_cache(maxsize=8)
 def _generator(model_cfg):
     import jax
-    from .supervised_models import generate
+    from .policy_backend import generate
 
     def one(params, tokens, mask, key):
         result = generate(params, tokens[None], mask[None], model_cfg, key)
@@ -276,7 +331,7 @@ def _generator(model_cfg):
 
 def generate_samples(params, model_cfg, dataset, target_rows, *, support_count,
                      selection_mode, condition_on_support=True, seed=2030,
-                     batch_size=8, progress=True):
+                     batch_size=64, progress=True):
     """Generate from context only, with keys determined by global centroid row."""
     import jax
     import jax.numpy as jnp
@@ -347,17 +402,24 @@ def generate_samples(params, model_cfg, dataset, target_rows, *, support_count,
 
 
 def evaluate_params(params, model_cfg, dataset, reference, output, *, support_count,
-                    selection_mode, condition_on_support=True, seed=2030, batch_size=8,
+                    selection_mode, condition_on_support=True, seed=2030, batch_size=64,
                     python, donor_root, extractor_checkpoint, checkpoint_provenance=None,
                     feature_batch_size=64, keep_artifacts=False, checkpoint_id=None,
-                    optimizer_step=None, progress=True):
+                    optimizer_step=None, progress=True, class_split=None, category_scope='auto'):
     """Evaluate live parameters without saving a checkpoint or advancing train RNG."""
     import jax
+    from .policy_backend import method_name, numerical_sources
 
     if feature_batch_size < 1:
         raise ValueError('Feature batch size must be positive.')
     if reference.metadata['dataset_identifier'] != dataset.identifier:
         raise ValueError('FID reference and full dataset identities differ.')
+    if class_split is not None:
+        from .class_split import evaluation_category_ids
+        expected = evaluation_category_ids(dataset, class_split, category_scope)
+        actual = sorted(int(value) for value in np.unique(dataset.category_ids[reference.target_rows]))
+        if actual != sorted(expected):
+            raise ValueError('FID reference categories differ from the checkpoint evaluation scope.')
     preflight(reference, python=python, donor_root=donor_root,
               extractor_checkpoint=extractor_checkpoint, checkpoint_provenance=checkpoint_provenance)
     output = Path(output)
@@ -366,6 +428,8 @@ def evaluate_params(params, model_cfg, dataset, reference, output, *, support_co
                 'support_count': support_count, 'selection_mode': selection_mode,
                 'condition_on_support': condition_on_support, 'checkpoint_id': checkpoint_id,
                 'optimizer_step': optimizer_step}
+    if class_split is not None:
+        identity.update(class_split_id=class_split['identifier'], category_scope=category_scope)
     previous_path = output / 'summary.json'
     if previous_path.exists():
         previous = json.loads(previous_path.read_text())
@@ -380,15 +444,22 @@ def evaluate_params(params, model_cfg, dataset, reference, output, *, support_co
         metadata = _trajectory_metadata(dataset, records, reference.metadata['selection_id'])
         generation_provenance = {
             'model': asdict(model_cfg) if model_cfg is not None else None,
+            'method': method_name(model_cfg) if model_cfg is not None else None,
             'source_hashes': {name: metrics.file_sha256(Path(__file__).with_name(name)) for name in
-                              ('supervised_fid.py', 'supervised_models.py', 'metrics.py', 'metrics_worker.py')},
+                              ('supervised_fid.py', 'class_split.py', 'metrics.py', 'metrics_worker.py')},
             'environment': {name: importlib.metadata.version(name) for name in ('jax', 'jaxlib', 'numpy')},
             'backend': jax.default_backend(),
             'device_kinds': [device.device_kind for device in jax.local_devices()],
         }
+        if model_cfg is not None:
+            generation_provenance['source_hashes'].update({
+                name: metrics.file_sha256(path) for name, path in numerical_sources(model_cfg).items()})
         metadata.update(reference_id=reference.identifier, checkpoint_id=checkpoint_id,
                         optimizer_step=optimizer_step, generation_seed=seed,
                         generation_provenance=generation_provenance)
+        if class_split is not None:
+            metadata.update(class_split=class_split, category_scope=category_scope)
+        metadata['evaluation_categories'] = reference.metadata['categories']
         metrics.save_trajectories(work / 'generated', arrays, metadata)
         _status(f'Extracting frozen features for {len(records):,} generated sketches on CPU ...', progress)
         metrics.extract_features(work / 'generated', work / 'features', python=python,
@@ -405,9 +476,11 @@ def evaluate_params(params, model_cfg, dataset, reference, output, *, support_co
             'description': 'Pooled Frechet distance in frozen sketch-trained ResNet18 features; not Inception FID',
             'dataset_identifier': dataset.identifier, 'reference_id': reference.identifier,
             'selection_id': reference.metadata['selection_id'], 'split': reference.split,
-            'category_weighting': 'uniform', 'category_count': len(dataset.categories),
+            'category_weighting': 'uniform', 'category_count': len(reference.metadata['categories']),
+            'categories': reference.metadata['categories'],
             'samples_per_category': reference.samples_per_category,
             'generated_count': len(generated), 'reference_count': len(reference.features),
+            'generation_batch_size': batch_size, 'feature_batch_size': feature_batch_size,
             'generation_seed': seed, 'support_count': support_count, 'selection_mode': selection_mode,
             'condition_on_support': condition_on_support, 'checkpoint_id': checkpoint_id,
             'optimizer_step': optimizer_step, 'statistics': feature_metadata['statistics'],
@@ -421,6 +494,11 @@ def evaluate_params(params, model_cfg, dataset, reference, output, *, support_co
             'elapsed_seconds': time.monotonic() - started,
             'uncertainty': 'Finite-sample, model-dependent biased estimate; compare fixed populations/sample counts.',
             'artifacts_retained': bool(keep_artifacts)}
+        if 'parent_reference_id' in reference.metadata:
+            report['parent_reference_id'] = reference.metadata['parent_reference_id']
+        if class_split is not None:
+            report.update(class_split=class_split, class_split_id=class_split['identifier'],
+                          category_scope=category_scope)
         # Small enough for periodic provenance; full images/features are opt-in.
         _dump(work / 'generation.json', metadata)
         (work / 'generation.json').replace(output / 'generation.json')
@@ -441,18 +519,25 @@ def evaluate_params(params, model_cfg, dataset, reference, output, *, support_co
     return report
 
 
-def evaluate_checkpoint(checkpoint, reference, output, *, dataset_root=None, allow_test=False, **kwargs):
+def evaluate_checkpoint(checkpoint, reference, output, *, dataset_root=None, allow_test=False,
+                        category_scope='auto', **kwargs):
     import jax
     import jax.numpy as jnp
     from .supervised_train import load_run
+    from .class_split import evaluation_category_ids, resolve_class_split
 
     payload, cfg, model_cfg, dataset = load_run(checkpoint, dataset_root=dataset_root)
     frozen = load_reference(reference, dataset, allow_test=allow_test)
+    class_split = resolve_class_split(dataset, cfg)
+    categories = evaluation_category_ids(dataset, cfg, category_scope)
+    frozen = select_reference_categories(frozen, dataset, categories)
     params = jax.tree_util.tree_map(jnp.asarray, payload['params'])
     return evaluate_params(params, model_cfg, dataset, frozen, output,
         support_count=cfg['support_count'], selection_mode=cfg['selection_mode'],
         condition_on_support=cfg.get('condition_on_support', True),
-        checkpoint_id=metrics.file_sha256(checkpoint), optimizer_step=int(payload['step']), **kwargs)
+        checkpoint_id=metrics.file_sha256(checkpoint), optimizer_step=int(payload['step']),
+        class_split=class_split if class_split['heldout_category_count'] else None,
+        category_scope=category_scope, **kwargs)
 
 
 def main(argv=None):
@@ -468,8 +553,9 @@ def main(argv=None):
     evaluate.add_argument('--checkpoint', required=True)
     evaluate.add_argument('--reference', required=True)
     evaluate.add_argument('--dataset-root')
+    evaluate.add_argument('--category-scope', choices=('auto', 'heldout', 'seen', 'all'), default='auto')
     evaluate.add_argument('--seed', type=int, default=2030)
-    evaluate.add_argument('--batch-size', type=int, default=8)
+    evaluate.add_argument('--batch-size', type=int, default=64)
     evaluate.add_argument('--feature-batch-size', type=int, default=64)
     evaluate.add_argument('--keep-artifacts', action='store_true')
     for command in (prepare, evaluate):
