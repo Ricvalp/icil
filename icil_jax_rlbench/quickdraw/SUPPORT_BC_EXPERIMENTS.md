@@ -7,6 +7,9 @@ All runs use the same 310 policy-training classes and 35 held-out classes
 (class-split seed 37), training seed 0, K=4, effective task batch 64, float32,
 and 20 epochs. No dataset, classifier, or nearest-neighbor rebuild is needed.
 
+For 500k, 1M, and 3M fast-memory budgets with both objectives and Transformer
+sizes, use the twelve jobs in [FAST_CAPACITY_EXPERIMENTS.md](FAST_CAPACITY_EXPERIMENTS.md).
+
 Support-BC uses the query decoder and probabilistic output head to predict each
 demonstration's next action from its causal preceding actions. It pools all
 valid events from all K demonstrations, including STOP, into one support loss.

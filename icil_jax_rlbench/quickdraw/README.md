@@ -10,6 +10,9 @@ Full-data fast-weight Transformer experiments use either [KVB WRITE](KVB_TRANSFO
 or [support-BC WRITE](SUPPORT_BC_EXPERIMENTS.md), with full second-order gradients.
 The support-BC guide provides six H200 jobs comparing WRITE objectives, inner-step
 counts, and policy capacity under the same [35-class holdout](CLASS_HOLDOUT.md).
+The [fast-memory capacity matrix](FAST_CAPACITY_EXPERIMENTS.md) supplies twelve
+additional jobs for approximately 500k, 1M, or 3M fast parameters, both WRITE
+objectives, and both Transformer sizes.
 
 This implementation lives on `quick-robot-draw`, created from the merged main
 line. It follows `QUICK_ROBOT_DRAW_ICIL_JAX_IMPLEMENTATION_PLAN.md`; its older

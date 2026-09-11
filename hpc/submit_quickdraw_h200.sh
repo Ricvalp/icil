@@ -14,6 +14,18 @@ case "$mode" in
     bc-fast128-heldout) batch_script=hpc/quickdraw_bc_fast128_heldout_h200.sbatch ;;
     bc-large-heldout) batch_script=hpc/quickdraw_bc_large_heldout_h200.sbatch ;;
     kvb-large-heldout) batch_script=hpc/quickdraw_kvb_large_heldout_h200.sbatch ;;
+    bc-base-f500k) batch_script=hpc/quickdraw_bc_base_f500k_h200.sbatch ;;
+    bc-base-f1m) batch_script=hpc/quickdraw_bc_base_f1m_h200.sbatch ;;
+    bc-base-f3m) batch_script=hpc/quickdraw_bc_base_f3m_h200.sbatch ;;
+    bc-large-f500k) batch_script=hpc/quickdraw_bc_large_f500k_h200.sbatch ;;
+    bc-large-f1m) batch_script=hpc/quickdraw_bc_large_f1m_h200.sbatch ;;
+    bc-large-f3m) batch_script=hpc/quickdraw_bc_large_f3m_h200.sbatch ;;
+    kvb-base-f500k) batch_script=hpc/quickdraw_kvb_base_f500k_h200.sbatch ;;
+    kvb-base-f1m) batch_script=hpc/quickdraw_kvb_base_f1m_h200.sbatch ;;
+    kvb-base-f3m) batch_script=hpc/quickdraw_kvb_base_f3m_h200.sbatch ;;
+    kvb-large-f500k) batch_script=hpc/quickdraw_kvb_large_f500k_h200.sbatch ;;
+    kvb-large-f1m) batch_script=hpc/quickdraw_kvb_large_f1m_h200.sbatch ;;
+    kvb-large-f3m) batch_script=hpc/quickdraw_kvb_large_f3m_h200.sbatch ;;
     visualize|fid) batch_script=hpc/quickdraw_evaluate_h200.sbatch ;;
     *) printf 'Unknown experiment: %s. See hpc/README.md for submission modes.\n' "$mode" >&2; exit 2 ;;
 esac

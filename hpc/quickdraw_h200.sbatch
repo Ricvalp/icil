@@ -30,6 +30,18 @@ case "$architecture" in
     bc-fast128-heldout) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_fast128_heldout.py ;;
     bc-large-heldout) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_large_heldout.py ;;
     kvb-large-heldout) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_large_heldout.py ;;
+    bc-base-f500k) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_base_fast500k_heldout.py ;;
+    bc-base-f1m) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_base_fast1m_heldout.py ;;
+    bc-base-f3m) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_base_fast3m_heldout.py ;;
+    bc-large-f500k) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_large_fast500k_heldout.py ;;
+    bc-large-f1m) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_large_fast1m_heldout.py ;;
+    bc-large-f3m) config=icil_jax_rlbench/configs/quickdraw_support_bc_transformer_large_fast3m_heldout.py ;;
+    kvb-base-f500k) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_base_fast500k_heldout.py ;;
+    kvb-base-f1m) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_base_fast1m_heldout.py ;;
+    kvb-base-f3m) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_base_fast3m_heldout.py ;;
+    kvb-large-f500k) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_large_fast500k_heldout.py ;;
+    kvb-large-f1m) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_large_fast1m_heldout.py ;;
+    kvb-large-f3m) config=icil_jax_rlbench/configs/quickdraw_kvb_transformer_large_fast3m_heldout.py ;;
     *) printf 'Unknown experiment: %s. See hpc/README.md for submission modes.\n' "$architecture" >&2; exit 2 ;;
 esac
 

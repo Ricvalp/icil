@@ -128,6 +128,17 @@ own 12-hour H200 batch file. See the
 [support-BC experiment guide](../icil_jax_rlbench/quickdraw/SUPPORT_BC_EXPERIMENTS.md)
 for the comparison table, exact commands, output directories, and resume.
 
+Twelve larger-fast-state experiments cross BC/KVB WRITE, base/large Transformers,
+and approximately 500k/1M/3M fast parameters. Their submission modes are
+`{bc,kvb}-{base,large}-f{500k,1m,3m}`, for example `bc-base-f500k` or
+`kvb-large-f3m`, each with a separate 12-hour, single-H200 batch file. See the
+[fast-capacity experiment guide](../icil_jax_rlbench/quickdraw/FAST_CAPACITY_EXPERIMENTS.md)
+for dimensions, total parameter counts, and the twelve commands. Only these new
+batch files disable CUDA-graph capture by default after the large KVB capture
+failure on peano; they print the resulting `XLA_FLAGS` in the job log. Set
+`QUICKDRAW_CUDA_GRAPHS=1` before submission to keep inherited XLA flags without
+adding the workaround. Existing experiment modes keep their original defaults.
+
 Each command submits a separate 12-hour, single-H200 job. Use only the command
 for the experiment you want to run. The ordinary AR/diffusion hyperparameters remain K=4, effective batch
 64, microbatch 16, 20 epochs, and four-example plot panels every 10,000 updates.
